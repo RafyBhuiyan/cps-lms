@@ -8,9 +8,11 @@ import { isAdmin } from '../../../utils/roles';
 import {
   ANY_VERSION,
   NO_LIMIT,
+  attachOwner,
   canManageCourse,
   computeCourseProgress,
   scopeQueryToDocuments,
+  uniqueSlug,
 } from '../../../utils/lms';
 
 /**
@@ -91,6 +93,9 @@ export default factories.createCoreController('api::course.course', () => ({
    * Ownership is server-assigned. A client-supplied `creator` is discarded, so a
    * course cannot be attributed to another user — which matters because
    * `creator` is what every ownership check downstream reads.
+   *
+   * Assigned after the row exists rather than in the payload: see `attachOwner`
+   * for why a `creator` key in the body is a 400 for every role here.
    */
   async create(ctx: Context) {
     const { user } = ctx.state;
@@ -105,9 +110,26 @@ export default factories.createCoreController('api::course.course', () => ({
       return ctx.badRequest('Missing "data" payload in the request body.');
     }
 
-    body.data.creator = user.id;
+    delete body.data.creator;
 
-    return super.create(ctx);
+    // The content API does not generate uid fields (see `uniqueSlug`), so a course
+    // created from the instructor dashboard would have `slug: null` while every
+    // seeded or admin-panel course has one.
+    if (typeof body.data.slug !== 'string' || (body.data.slug as string).trim() === '') {
+      body.data.slug = await uniqueSlug(
+        'api::course.course',
+        String(body.data.title ?? ''),
+        'course'
+      );
+    }
+
+    const response = (await super.create(ctx)) as { data?: { documentId?: string } };
+
+    if (response?.data?.documentId) {
+      await attachOwner('api::course.course', response.data.documentId, 'creator', user.id);
+    }
+
+    return response;
   },
 
   /**

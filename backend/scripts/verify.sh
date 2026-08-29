@@ -493,5 +493,54 @@ check "leaving the published count as it was" 1 \
   "$(rows '/api/blogs?pagination[pageSize]=100' "$T_S1")"
 
 echo
+echo "=== creating a course and enrolling attach an owner ==="
+# `Course.creator`, `Blog.author` and `Enrollment.user` all point at the
+# users-permissions user, and the content API rejects any *payload key* reaching a
+# type the caller cannot `find` — which is every role here — so all three creates
+# were returning `400 Invalid key <field>`. Ownership is stamped through the
+# Document Service after the row exists, so these assert the attribution and not
+# merely a 2xx: a course with no creator is one its own author cannot edit.
+SMOKE_COURSE=$(post '/api/courses' "$T_I2" \
+  '{"data":{"title":"Ownership Smoke Course","description":"Created by verify.sh."}}')
+SMOKE_COURSE_ID=$(printf '%s' "$SMOKE_COURSE" | grep -oP '"documentId":"\K[^"]+' | head -1)
+
+check "an instructor can create a course" ok "${SMOKE_COURSE_ID:+ok}"
+check "and a slug is derived for it" ownership-smoke-course \
+  "$(printf '%s' "$SMOKE_COURSE" | grep -oP '"slug":"\K[^"]+' | head -1)"
+check "it is attributed to its creator" 1 \
+  "$(rows "/api/courses?mine=true&filters[documentId]=$SMOKE_COURSE_ID" "$T_I2")"
+check "not to another instructor" 0 \
+  "$(rows "/api/courses?mine=true&filters[documentId]=$SMOKE_COURSE_ID" "$T_I1")"
+# The attribution has to hold for the ownership policies too, which read the
+# course rather than the caller's own list.
+check "and its creator may edit it" 200 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID" "$T_I2" '{"data":{"description":"Edited."}}')"
+
+# student2 is enrolled nowhere, so its list is a clean before/after.
+S2_BEFORE=$(rows '/api/enrollments?pagination[pageSize]=100' "$T_S2")
+check "a student can enrol themselves" 201 \
+  "$(status POST '/api/enrollments' "$T_S2" "{\"data\":{\"course\":\"$SMOKE_COURSE_ID\"}}")"
+check "the enrollment belongs to them" "$((S2_BEFORE + 1))" \
+  "$(rows '/api/enrollments?pagination[pageSize]=100' "$T_S2")"
+# Without a `user` the row would belong to nobody, and the `find` scope on
+# enrollments is by user — so an unowned row is invisible to its own student. That
+# the *other* student's list does not contain it is what proves the relation landed
+# on the account that asked for it rather than on whoever happened to be first.
+check "and not to another student" 0 \
+  "$(rows "/api/enrollments?filters[course][documentId]=$SMOKE_COURSE_ID&pagination[pageSize]=100" "$T_S1")"
+check "enrolling again is a conflict" 409 \
+  "$(status POST '/api/enrollments' "$T_S2" "{\"data\":{\"course\":\"$SMOKE_COURSE_ID\"}}")"
+
+# Cleaned up in dependency order — the enrollment first, so deleting the course
+# cannot leave an orphan row pointing at a course that no longer exists.
+for created in $(ids "/api/enrollments?filters[course][documentId]=$SMOKE_COURSE_ID&pagination[pageSize]=100" "$T_ADMIN"); do
+  check "the smoke enrollment is cleaned up" 204 \
+    "$(status DELETE "/api/enrollments/$created" "$T_ADMIN")"
+done
+check "the smoke course is cleaned up" 204 \
+  "$(status DELETE "/api/courses/$SMOKE_COURSE_ID" "$T_I2")"
+check "leaving the catalog as it was" 1 "$(rows '/api/courses?pagination[pageSize]=100' "$T_S1")"
+
+echo
 printf 'pass=%s fail=%s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

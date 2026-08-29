@@ -7,6 +7,7 @@ import type { Context } from 'koa';
 import { isPrivileged, isStudent } from '../../../utils/roles';
 import {
   ANY_VERSION,
+  attachOwner,
   findEnrollment,
   manageableCourseIds,
   scopeQueryToDocuments,
@@ -85,6 +86,9 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
    * A student enrols *themselves*. The `user` is taken from the token and a
    * client-supplied one is discarded, so posting someone else's id enrols the
    * caller rather than the target.
+   *
+   * The relation is attached after the row exists; see `attachOwner` for why a
+   * `user` key in the payload is rejected outright.
    */
   async create(ctx: Context) {
     const { user } = ctx.state;
@@ -126,10 +130,21 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
       return ctx.conflict('You are already enrolled in this course.');
     }
 
-    body.data.user = user.id;
+    delete body.data.user;
     body.data.course = { documentId: courseDocumentId };
     body.data.enrolledAt = new Date().toISOString();
 
-    return super.create(ctx);
+    const response = (await super.create(ctx)) as { data?: { documentId?: string } };
+
+    if (response?.data?.documentId) {
+      await attachOwner(
+        'api::enrollment.enrollment',
+        response.data.documentId,
+        'user',
+        user.id
+      );
+    }
+
+    return response;
   },
 }));

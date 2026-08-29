@@ -60,6 +60,58 @@ export type CourseProgress = {
 const docs = (uid: UID.ContentType) => strapi.documents(uid as never) as any;
 
 /* -------------------------------------------------------------------------- */
+/* Slugs                                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** A uid field must be URL-safe and unique, so this is what it is reduced to. */
+export const slugify = (value: string) =>
+  value
+    .toLowerCase()
+    .normalize('NFKD')
+    // Any run of non-alphanumerics becomes a single dash; `u` keeps this working
+    // for non-Latin titles rather than reducing them to an empty string.
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+
+/**
+ * A slug derived from `title` that no document of `uid` is using yet.
+ *
+ * Needed because the content API does not fill uid fields at all: that generation
+ * lives in the admin panel's content-manager plugin (`services/uid.js`), so a row
+ * created over REST is saved with `slug: null`. For the blog that is fatal — posts
+ * are addressed by slug, so the post would be unreachable at its own URL — and for
+ * a course it means content created from the instructor dashboard is inconsistent
+ * with everything seeded or authored in the admin panel.
+ */
+export const uniqueSlug = async (
+  uid: UID.ContentType,
+  title: string,
+  fallback = 'item'
+): Promise<string> => {
+  const base = slugify(title) || fallback;
+
+  for (let attempt = 1; attempt <= 50; attempt += 1) {
+    const candidate = attempt === 1 ? base : `${base}-${attempt}`;
+
+    const [taken] = await docs(uid).findMany({
+      filters: { slug: candidate },
+      limit: 1,
+      // Draft rows hold the uid too, so a published-only check would miss a
+      // collision and the unique index would reject the insert.
+      ...ANY_VERSION,
+    });
+
+    if (!taken) {
+      return candidate;
+    }
+  }
+
+  // 50 rows sharing a title is not a case worth another query for.
+  return `${base}-${Math.round(Math.random() * 1e6)}`;
+};
+
+/* -------------------------------------------------------------------------- */
 /* Quizzes                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -376,6 +428,30 @@ export const quizzesOfCourses = (courseDocumentIds: string[]) => ({
 /* -------------------------------------------------------------------------- */
 /* Upsert                                                                     */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Stamps the owning account on a row that was just created through the REST
+ * layer — `Course.creator`, `Blog.author`, `Enrollment.user`.
+ *
+ * It cannot be done in the request body, which is the obvious way and does not
+ * work. All three fields point at `plugin::users-permissions.user`, and the
+ * content API rejects any payload key that reaches a type the caller cannot
+ * `find` (`@strapi/utils` validate/visitors/throw-restricted-relations.js) with
+ * `400 ValidationError: Invalid key <field>`. That is every role in this project:
+ * granting `user.find` to make the payload legal would let any logged-in account
+ * enumerate the user table, which is a far worse trade than a second write.
+ *
+ * The Document Service is not subject to content-API validation, so ownership is
+ * attached here instead. `PUBLISHED` matters: a REST create publishes the
+ * document, ownership checks read the draft version, and readers see the
+ * published one — writing only the draft would leave the published row ownerless.
+ */
+export const attachOwner = async (
+  uid: UID.ContentType,
+  documentId: string,
+  field: 'creator' | 'author' | 'user',
+  userId: number
+) => docs(uid).update({ documentId, data: { [field]: userId }, ...PUBLISHED });
 
 /**
  * Create-or-update by filter, standing in for the composite unique constraints
