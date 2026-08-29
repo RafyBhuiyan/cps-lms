@@ -12,7 +12,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { useAuth } from '@/lib/auth';
-import { roleTypeOf } from '@/lib/roles';
+import { roleLabel } from '@/lib/roles';
 import type { Profile } from '@/lib/types';
 import { Loading, btnPrimary, card, muted } from './ui';
 
@@ -54,7 +54,10 @@ export function RequireRole({
         <div className={card}>
           <h1 className="text-lg font-semibold">Not for your role</h1>
           <p className={`mt-2 ${muted}`}>
-            You are signed in as <strong>{roleTypeOf(user)}</strong>, which does not have
+            {/* The label, not the raw role type: a student's role is the built-in
+                `authenticated` one, and "signed in as authenticated" reads as a
+                bug rather than an explanation. */}
+            You are signed in as <strong>{roleLabel(user)}</strong>, which does not have
             access here.
           </p>
           <Link href="/courses" className={`${btnPrimary} mt-4`}>
