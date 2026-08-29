@@ -28,6 +28,9 @@ const READ_CONTENT = [
   'api::quiz.quiz.findOne',
   'api::blog.blog.find',
   'api::blog.blog.findOne',
+  // How the frontend learns who it is talking for. Every logged-in role needs it;
+  // `public` deliberately does not, since it answers 401 with no token anyway.
+  'api::profile.profile.me',
 ];
 
 const MANAGE_CONTENT = [

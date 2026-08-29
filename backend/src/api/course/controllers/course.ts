@@ -10,6 +10,7 @@ import {
   NO_LIMIT,
   canManageCourse,
   computeCourseProgress,
+  scopeQueryToDocuments,
 } from '../../../utils/lms';
 
 /**
@@ -42,6 +43,48 @@ const finalQuizScore = async (course: any, userId: number) => {
 };
 
 export default factories.createCoreController('api::course.course', () => ({
+  /**
+   * GET /api/courses[?mine=true]
+   *
+   * The catalog, unchanged, plus one opt-in narrowing: `mine=true` returns only
+   * the courses the caller created or co-teaches.
+   *
+   * It has to be done here because the equivalent client-side filter is
+   * impossible. `?filters[creator][id]=<me>` reaches through a relation whose
+   * target is the users-permissions user, and the query validator rejects that
+   * for any role without `user.find`
+   * (validate/visitors/throw-restricted-relations.js:82) — granting which would
+   * let instructors enumerate every account on the platform. `mine` needs no such
+   * grant: the scope is resolved server-side and only documentIds reach the query.
+   *
+   * `mine` is removed from the query before delegating; it is not a content-API
+   * key, and leaving it in place would risk a 400 from the query validator.
+   */
+  async find(ctx: Context) {
+    const query = ctx.query as Record<string, unknown>;
+    const mine = query.mine;
+
+    if (mine === undefined) {
+      return super.find(ctx);
+    }
+
+    delete query.mine;
+
+    const { user } = ctx.state;
+
+    if (!user) {
+      return ctx.unauthorized('You must be logged in to list your own courses.');
+    }
+
+    if (mine === 'true' || mine === '1' || mine === true) {
+      await scopeQueryToDocuments(ctx, 'api::course.course', {
+        $or: [{ creator: { id: user.id } }, { instructors: { id: user.id } }],
+      });
+    }
+
+    return super.find(ctx);
+  },
+
   /**
    * POST /api/courses
    *
