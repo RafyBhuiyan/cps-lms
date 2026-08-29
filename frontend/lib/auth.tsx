@@ -48,23 +48,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // localStorage is read in an effect, not in the initial state: this component
   // is prerendered on the server, where `window` does not exist, and seeding
   // state from it would produce a hydration mismatch.
+  //
+  // Even the "no stored token" answer is delivered through the promise chain
+  // rather than set straight from the effect body, which would be a synchronous
+  // setState in an effect — a cascading render, and a lint error under
+  // `react-hooks/set-state-in-effect`. The extra microtask is not observable.
   useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-
-    if (!stored) {
-      setStatus('anonymous');
-      return;
-    }
-
     let cancelled = false;
 
-    api
-      .getProfile(stored)
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    const check = stored ? api.getProfile(stored) : Promise.resolve(null);
+
+    check
       .then((profile) => {
         if (cancelled) return;
-        setToken(stored);
-        setUser(profile);
-        setStatus('authenticated');
+
+        if (stored && profile) {
+          setToken(stored);
+          setUser(profile);
+          setStatus('authenticated');
+          return;
+        }
+
+        setStatus('anonymous');
       })
       .catch((error: unknown) => {
         if (cancelled) return;

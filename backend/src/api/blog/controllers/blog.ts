@@ -29,6 +29,46 @@ const draftScopeFor = (user: AuthUser | undefined): Record<string, any> | null =
   return { currentStatus: 'published' };
 };
 
+/** `slug` is a uid field, so it must be URL-safe and unique. */
+const slugify = (value: string) =>
+  value
+    .toLowerCase()
+    .normalize('NFKD')
+    // Any run of non-alphanumerics becomes a single dash; `u` keeps this working
+    // for non-Latin titles rather than reducing them to an empty string.
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'post';
+
+/**
+ * First unused variation of `base`.
+ *
+ * Needed because the content API does not fill uid fields: that generation lives
+ * in the admin panel's content-manager plugin (`services/uid.js`), so a post
+ * created over REST would be saved with `slug: null` — and the blog is addressed
+ * by slug, which would make it unreachable at its own URL.
+ */
+const availableSlug = async (base: string) => {
+  for (let attempt = 1; attempt <= 50; attempt += 1) {
+    const candidate = attempt === 1 ? base : `${base}-${attempt}`;
+
+    const [taken] = await strapi.documents('api::blog.blog').findMany({
+      filters: { slug: candidate },
+      limit: 1,
+      // Draft rows hold the uid too, so a published-only check would miss a
+      // collision and the unique index would reject the insert.
+      ...ANY_VERSION,
+    });
+
+    if (!taken) {
+      return candidate;
+    }
+  }
+
+  // 50 posts sharing a title is not a case worth another query for.
+  return `${base}-${Math.round(Math.random() * 1e6)}`;
+};
+
 export default factories.createCoreController('api::blog.blog', () => ({
   /**
    * GET /api/blogs
@@ -102,6 +142,12 @@ export default factories.createCoreController('api::blog.blog', () => ({
 
     if (body.data.currentStatus !== 'published') {
       body.data.currentStatus = 'draft';
+    }
+
+    // A client may send its own slug; otherwise one is derived from the title, so
+    // every post created through the API has a working URL.
+    if (typeof body.data.slug !== 'string' || body.data.slug.trim() === '') {
+      body.data.slug = await availableSlug(slugify(String(body.data.title ?? '')));
     }
 
     return super.create(ctx);

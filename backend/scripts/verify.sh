@@ -459,5 +459,39 @@ check "and populating it yields no account data" 0 \
   "$(get '/api/quiz-results?populate=user' "$T_S1" | grep -oE '"(email|username)"' | wc -l)"
 
 echo
+echo "=== a post written from the frontend gets a usable URL ==="
+# uid fields are filled by the admin panel's content-manager plugin, not by the
+# content API, so a post created over REST arrives with `slug: null` — and the blog
+# is addressed by slug, which would leave it unreachable at its own URL. The
+# controller derives one on create.
+SMOKE_SLUG=frontend-smoke-test-post
+SMOKE_POST="{\"data\":{\"title\":\"Frontend Smoke Test Post\",\"body\":[{\"type\":\"paragraph\",\"children\":[{\"type\":\"text\",\"text\":\"Written by verify.sh.\"}]}]}}"
+
+# Leftovers from an interrupted run would shift the collision suffix asserted
+# below, so they go first.
+for leftover in $(ids "/api/blogs?filters[slug][\$startsWith]=$SMOKE_SLUG&pagination[pageSize]=100" "$T_ADMIN"); do
+  status DELETE "/api/blogs/$leftover" "$T_ADMIN" > /dev/null
+done
+
+SMOKE_1=$(post '/api/blogs' "$T_CM" "$SMOKE_POST")
+check "a slug is derived from the title" "$SMOKE_SLUG" \
+  "$(printf '%s' "$SMOKE_1" | grep -oP '"slug":"\K[^"]+' | head -1)"
+check "and the post starts as a draft" draft \
+  "$(printf '%s' "$SMOKE_1" | grep -oP '"currentStatus":"\K[^"]+' | head -1)"
+
+# `slug` is a uid, so it carries a unique index: a second post with the same title
+# must not be rejected by it.
+SMOKE_2=$(post '/api/blogs' "$T_CM" "$SMOKE_POST")
+check "a repeated title does not collide" "$SMOKE_SLUG-2" \
+  "$(printf '%s' "$SMOKE_2" | grep -oP '"slug":"\K[^"]+' | head -1)"
+
+# Removed again so the post counts asserted earlier still hold on the next run.
+for created in $(printf '%s%s' "$SMOKE_1" "$SMOKE_2" | grep -oP '"documentId":"\K[^"]+'); do
+  check "the smoke post is cleaned up" 204 "$(status DELETE "/api/blogs/$created" "$T_CM")"
+done
+check "leaving the published count as it was" 1 \
+  "$(rows '/api/blogs?pagination[pageSize]=100' "$T_S1")"
+
+echo
 printf 'pass=%s fail=%s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
