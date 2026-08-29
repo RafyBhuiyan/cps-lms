@@ -501,6 +501,7 @@ export interface ApiCourseCourse extends Struct.CollectionTypeSchema {
       'oneToMany',
       'api::enrollment.enrollment'
     >;
+    final_quiz: Schema.Attribute.Relation<'oneToOne', 'api::quiz.quiz'>;
     instructors: Schema.Attribute.Relation<
       'manyToMany',
       'plugin::users-permissions.user'
@@ -512,8 +513,8 @@ export interface ApiCourseCourse extends Struct.CollectionTypeSchema {
       'api::course.course'
     > &
       Schema.Attribute.Private;
+    practice_quizzes: Schema.Attribute.Relation<'oneToMany', 'api::quiz.quiz'>;
     publishedAt: Schema.Attribute.DateTime;
-    quiz: Schema.Attribute.Relation<'oneToOne', 'api::quiz.quiz'>;
     slug: Schema.Attribute.UID<'title'>;
     title: Schema.Attribute.String & Schema.Attribute.Required;
     updatedAt: Schema.Attribute.DateTime;
@@ -671,12 +672,14 @@ export interface ApiQuizQuiz extends Struct.CollectionTypeSchema {
     draftAndPublish: true;
   };
   attributes: {
+    course: Schema.Attribute.Relation<'oneToOne', 'api::course.course'>;
     createdAt: Schema.Attribute.DateTime;
     createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
     locale: Schema.Attribute.String & Schema.Attribute.Private;
     localizations: Schema.Attribute.Relation<'oneToMany', 'api::quiz.quiz'> &
       Schema.Attribute.Private;
+    parent_course: Schema.Attribute.Relation<'manyToOne', 'api::course.course'>;
     publishedAt: Schema.Attribute.DateTime;
     Question: Schema.Attribute.Component<'quiz-data.question', true>;
     quiz_results: Schema.Attribute.Relation<

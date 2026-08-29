@@ -21,6 +21,18 @@
       "relation": "oneToMany",
       "target": "api::quiz-result.quiz-result",
       "mappedBy": "quiz"
+    },
+    "course": {
+      "type": "relation",
+      "relation": "oneToOne",
+      "target": "api::course.course",
+      "mappedBy": "final_quiz"
+    },
+    "parent_course": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::course.course",
+      "inversedBy": "practice_quizzes"
     }
   }
 }

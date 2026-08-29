@@ -12,7 +12,8 @@
       "type": "json"
     },
     "correctOptionIndex": {
-      "type": "integer"
+      "type": "integer",
+      "private": true
     }
   },
   "config": {}

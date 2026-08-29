@@ -49,10 +49,17 @@
       "target": "api::enrollment.enrollment",
       "mappedBy": "course"
     },
-    "quiz": {
+    "final_quiz": {
       "type": "relation",
       "relation": "oneToOne",
-      "target": "api::quiz.quiz"
+      "target": "api::quiz.quiz",
+      "inversedBy": "course"
+    },
+    "practice_quizzes": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::quiz.quiz",
+      "mappedBy": "parent_course"
     }
   }
 }

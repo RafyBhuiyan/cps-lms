@@ -6,7 +6,7 @@ export interface QuizDataQuestion extends Struct.ComponentSchema {
     displayName: 'Question';
   };
   attributes: {
-    correctOptionIndex: Schema.Attribute.Integer;
+    correctOptionIndex: Schema.Attribute.Integer & Schema.Attribute.Private;
     options: Schema.Attribute.JSON;
     questionText: Schema.Attribute.Text;
   };
