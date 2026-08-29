@@ -185,8 +185,18 @@ FRONTEND_URL=https://<your-project>.vercel.app
 Comma-separated if you want preview deployments to work too — `config/middlewares.ts`
 splits on commas. Redeploy the Strapi service.
 
+**No trailing slash.** A browser's `Origin` header never carries one, so
+`https://cps-lms-nine.vercel.app/` matches nothing and every request fails CORS
+while the variable looks correctly set. `config/middlewares.ts` now strips
+trailing slashes defensively, but the value is clearer without one.
+
 Until this is set, the API only allows `http://localhost:3000` and the deployed
-frontend gets CORS errors on every request.
+frontend gets CORS errors on every request. To check it from the terminal without
+a browser, ask for the header directly — an allowed origin is echoed back:
+
+```bash
+curl -sD - -o /dev/null -H 'Origin: https://<your-project>.vercel.app' https://<your-service>.up.railway.app/api/courses | grep -i access-control-allow-origin
+```
 
 ## 7. Verify
 
