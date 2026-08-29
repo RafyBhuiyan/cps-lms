@@ -14,7 +14,8 @@
     "start": "strapi start",
     "strapi": "strapi",
     "upgrade": "npx @strapi/upgrade latest",
-    "upgrade:dry": "npx @strapi/upgrade latest --dry"
+    "upgrade:dry": "npx @strapi/upgrade latest --dry",
+    "verify": "bash scripts/verify.sh"
   },
   "dependencies": {
     "@strapi/database": "5.52.2",

@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+#
+# End-to-end verification of the quiz and progress systems — `npm run verify`
+# from the backend directory, against a running server with `npm run seed` data.
+#
+# Every line asserts an expected HTTP status or row count. A FAIL is a real
+# defect. Written as a shell script rather than with a test runner because the
+# backend has no test dependency installed and these assertions are about HTTP
+# responses, not units.
+#
+# Repeatable: it normalizes the progress state before asserting on it, so it does
+# not depend on what a previous run left behind.
+
+set -u
+
+API=${API:-http://localhost:1337}
+PASSWORD=Demo1234!
+COURSE_SLUG=intro-to-typescript
+
+pass=0
+fail=0
+
+# --------------------------------------------------------------------------- #
+# Helpers                                                                     #
+# --------------------------------------------------------------------------- #
+
+# All curl calls pass -g. Without it curl treats the `[` in `filters[x]` as URL
+# globbing and never sends the request, which reads as "zero rows" — a silent
+# false pass.
+CURL="curl -s -g"
+
+check() {
+  if [ "$2" = "$3" ]; then
+    printf '  PASS  %-56s %s\n' "$1" "$3"
+    pass=$((pass + 1))
+  else
+    printf '  FAIL  %-56s got=%s want=%s\n' "$1" "$3" "$2"
+    fail=$((fail + 1))
+  fi
+}
+
+# status <method> <path> [token] [json-body]
+status() {
+  local m=$1 p=$2 t=${3:-} b=${4:-}
+  if [ -n "$b" ]; then
+    $CURL -o /dev/null -w '%{http_code}' -X "$m" "$API$p" \
+      ${t:+-H "Authorization: Bearer $t"} -H 'Content-Type: application/json' -d "$b"
+  else
+    $CURL -o /dev/null -w '%{http_code}' -X "$m" "$API$p" ${t:+-H "Authorization: Bearer $t"}
+  fi
+}
+
+get() { $CURL "$API$1" ${2:+-H "Authorization: Bearer $2"}; }
+
+post() {
+  $CURL -X POST "$API$1" ${2:+-H "Authorization: Bearer $2"} \
+    -H 'Content-Type: application/json' -d "$3"
+}
+
+# Counts distinct documentIds in a response. `grep -c` counts matching *lines*
+# and the body is a single line, so it would report 1 for any non-empty response.
+rows() { get "$1" "${2:-}" | grep -oP '"documentId":"\K[^"]+' | sort -u | wc -l; }
+
+# documentIds in response order.
+ids() { get "$1" "${2:-}" | grep -oP '"documentId":"\K[^"]+'; }
+
+# num <json-key> — reads a number out of the last response piped in.
+num() { grep -oP "\"$1\":\"?\K[0-9.]+"; }
+
+# --------------------------------------------------------------------------- #
+# Tokens                                                                      #
+# --------------------------------------------------------------------------- #
+#
+# `/api/auth/local` is rate-limited by users-permissions (5 attempts per
+# identifier per 5 minutes). Re-running this script exhausted it, and a login
+# that returns no token makes an authorized request look like a denied one — an
+# anonymous PUT is 403, exactly like a forbidden one. So tokens are cached
+# between runs; they are valid for 30 days.
+CACHE=${TOKEN_CACHE:-/tmp/lms-verify-tokens.env}
+touch "$CACHE"
+
+# The email a token authenticates as — identity, not mere validity. A cached
+# token that authenticates as the *wrong* user is far worse than no token: a
+# cache in which T_I2 held the admin's JWT turned "another instructor cannot
+# delete this course" into an admin deleting it, and the seed course was gone,
+# with its lessons and quizzes left orphaned. Checking only for HTTP 200 does
+# not catch that; checking who answered does.
+token_email() {
+  [ -n "${1:-}" ] || return 0
+  $CURL -H "Authorization: Bearer $1" "$API/api/users/me" | grep -oP '"email":"\K[^"]+'
+}
+
+ensure_token() {
+  local var=$1 email=$2 cached token code attempt body who
+  cached=$(grep -oP "^$var=\K.*" "$CACHE" | tail -1 || true)
+
+  if [ "$(token_email "${cached:-}")" = "$email" ]; then
+    export "$var=$cached"
+    return 0
+  fi
+
+  for attempt in 1 2 3; do
+    # A per-account response file, removed first. Sharing one path meant that if a
+    # login did not overwrite it the next read picked up the *previous* account's
+    # response — which is how a cache ended up holding the admin's JWT under all
+    # six names.
+    body=/tmp/lms-verify-login.$var.json
+    rm -f "$body"
+
+    code=$($CURL -o "$body" -w '%{http_code}' -X POST "$API/api/auth/local" \
+      -H 'Content-Type: application/json' \
+      -d "{\"identifier\":\"$email\",\"password\":\"$PASSWORD\"}")
+    token=$(grep -oP '"jwt":"\K[^"]+' "$body" 2>/dev/null || true)
+    who=$(grep -oP '"email":"\K[^"]+' "$body" 2>/dev/null | head -1 || true)
+
+    # The token is cached only if the same response also identifies the account it
+    # was asked for, so a token can never be filed under the wrong name.
+    if [ -n "$token" ] && [ "$who" = "$email" ]; then
+      grep -v "^$var=" "$CACHE" > "$CACHE.tmp" 2>/dev/null || true
+      mv "$CACHE.tmp" "$CACHE"
+      printf '%s=%s\n' "$var" "$token" >> "$CACHE"
+      export "$var=$token"
+      return 0
+    fi
+
+    echo "  login $email -> HTTP $code (as '${who:-nobody}'); waiting out the rate limit ($attempt/3)" >&2
+    sleep 65
+  done
+
+  echo "LOGIN FAILED: $email (HTTP $code)" >&2
+  return 1
+}
+
+# A second student and a second instructor exist only to prove that role alone
+# does not grant access to another person's data or another instructor's course.
+register_if_missing() {
+  $CURL -o /dev/null -X POST "$API/api/auth/local/register" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$1\",\"email\":\"$2\",\"password\":\"$PASSWORD\"}"
+}
+
+register_if_missing student2 student2@demo.test
+register_if_missing instructor2 instructor2@demo.test
+
+ensure_token T_S1 student@demo.test || exit 1
+ensure_token T_S2 student2@demo.test || exit 1
+ensure_token T_I1 instructor@demo.test || exit 1
+ensure_token T_I2 instructor2@demo.test || exit 1
+ensure_token T_CM cm@demo.test || exit 1
+ensure_token T_ADMIN admin@demo.test || exit 1
+
+# Then prove, before a single assertion runs, that every token authenticates as
+# the person it is named for. Two failure modes this closes:
+#
+#   * A token that authenticates as nobody makes the whole suite fall through to
+#     anonymous requests, and anonymous results look like passes — a request with
+#     no token is 403 on a protected route, exactly like a denied one.
+#   * A token that authenticates as the *wrong* person turns the negative checks
+#     into privileged operations. The DELETE and PUT assertions below expect 403;
+#     run with an over-privileged token they succeed, and this suite stops
+#     verifying the system and starts damaging it.
+for account in "T_S1:student@demo.test" "T_S2:student2@demo.test" \
+               "T_I1:instructor@demo.test" "T_I2:instructor2@demo.test" \
+               "T_CM:cm@demo.test" "T_ADMIN:admin@demo.test"; do
+  name=${account%%:*}
+  want=${account#*:}
+  got=$(token_email "${!name}")
+  if [ "$got" != "$want" ]; then
+    echo "$name authenticates as '${got:-nobody}', not $want." >&2
+    echo "Delete $CACHE and re-run to fetch fresh tokens." >&2
+    exit 1
+  fi
+done
+
+# instructor2 registers into the default role; it needs the instructor role to
+# test instructor-vs-instructor ownership. Read through the admin token, because
+# `?populate=role` on /users/me is rejected for a caller whose own role lacks
+# `find` on the user content type.
+I2_ROLE=$(get '/api/users?filters[email]=instructor2@demo.test&populate=role' "$T_ADMIN" |
+  grep -oP '"type":"\K[^"]+' | head -1 || true)
+if [ "${I2_ROLE:-}" != "instructor" ]; then
+  echo "NOTE: instructor2@demo.test is not in the instructor role (found '${I2_ROLE:-unknown}')."
+  echo "      Assign it in Settings -> Users & Permissions -> Users, or the"
+  echo "      instructor-vs-instructor checks below will not mean anything."
+fi
+
+# --------------------------------------------------------------------------- #
+# Resolve documentIds                                                         #
+# --------------------------------------------------------------------------- #
+#
+# documentIds are random cuid2s regenerated by every fresh seed, so they are
+# looked up by natural key rather than hardcoded.
+COURSE=$(ids "/api/courses?filters[slug]=$COURSE_SLUG&fields[0]=slug" "$T_ADMIN" | head -1)
+[ -n "$COURSE" ] || { echo "Course '$COURSE_SLUG' not found — run 'npm run seed' first."; exit 1; }
+
+readarray -t LESSONS < <(ids \
+  "/api/lessons?filters[course][documentId]=$COURSE&fields[0]=title&sort=sequenceOrder:asc&pagination[pageSize]=100" \
+  "$T_ADMIN")
+# A quiz has no title of its own — which of the two course relations is set is
+# what makes it the final quiz or a practice one — so no `fields` here.
+FINAL_QUIZ=$(ids "/api/quizzes?filters[course][documentId]=$COURSE" "$T_ADMIN" | head -1)
+PRACTICE_QUIZ=$(ids "/api/quizzes?filters[parent_course][documentId]=$COURSE" "$T_ADMIN" | head -1)
+PUBLISHED_BLOG=$(ids '/api/blogs?filters[currentStatus]=published&fields[0]=title' "$T_ADMIN" | head -1)
+DRAFT_BLOG=$(ids '/api/blogs?filters[currentStatus]=draft&fields[0]=title' "$T_ADMIN" | head -1)
+
+TOTAL_LESSONS=${#LESSONS[@]}
+if [ "$TOTAL_LESSONS" -lt 5 ] || [ -z "$FINAL_QUIZ" ] || [ -z "$PRACTICE_QUIZ" ] ||
+   [ -z "$PUBLISHED_BLOG" ] || [ -z "$DRAFT_BLOG" ]; then
+  echo "Seed data incomplete (lessons=$TOTAL_LESSONS final=$FINAL_QUIZ practice=$PRACTICE_QUIZ)."
+  echo "Run 'npm run seed'."
+  exit 1
+fi
+
+# Three of five complete is the state every assertion below is written against.
+normalize_progress() {
+  local i
+  for i in 0 1 2; do
+    post "/api/lessons/${LESSONS[$i]}/complete" "$T_S1" '{}' > /dev/null
+  done
+  for i in 3 4; do
+    post '/api/lesson-progresses' "$T_S1" \
+      "{\"data\":{\"lesson\":\"${LESSONS[$i]}\",\"completed\":false}}" > /dev/null
+  done
+}
+
+normalize_progress
+
+ENROLLMENT=$(ids '/api/enrollments' "$T_S1" | head -1)
+S1_PROGRESS=$(ids '/api/lesson-progresses?pagination[pageSize]=100' "$T_S1" | head -1)
+
+# --------------------------------------------------------------------------- #
+echo
+echo "=== the answer key must never reach the wire ==="
+# correctOptionIndex is `private`, so it is stripped from every REST response
+# while remaining readable by the Document Service, which is what makes
+# server-side grading possible.
+for probe in "direct populate:/api/quizzes/$FINAL_QUIZ?populate=Question" \
+             "populate=*:/api/quizzes/$FINAL_QUIZ?populate=*" \
+             "nested via course:/api/courses/$COURSE?populate[final_quiz][populate]=Question"; do
+  label=${probe%%:*}
+  url=${probe#*:}
+  for who in "student:$T_S1" "admin:$T_ADMIN"; do
+    check "$label (${who%%:*})" 0 "$(get "$url" "${who#*:}" | grep -o correctOptionIndex | wc -l)"
+  done
+done
+# The questions must still be readable, or the quiz cannot be taken at all.
+check "questions still returned to the student" 4 \
+  "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_S1" | grep -o '"questionText"' | wc -l)"
+check "options still returned to the student" 4 \
+  "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_S1" | grep -o '"options"' | wc -l)"
+
+echo
+echo "=== progress tracking ==="
+P=$(get "/api/courses/$COURSE/progress" "$T_S1")
+check "completedLessons" 3 "$(printf '%s' "$P" | num completedLessons)"
+check "totalLessons" "$TOTAL_LESSONS" "$(printf '%s' "$P" | num totalLessons)"
+check "progressPercent" 60 "$(printf '%s' "$P" | num progressPercent)"
+
+R=$(post "/api/lessons/${LESSONS[0]}/complete" "$T_S1" '{}')
+check "re-completing a finished lesson stays 3" 3 "$(printf '%s' "$R" | num completedLessons)"
+check "and the percentage does not drift" 60 "$(printf '%s' "$R" | num progressPercent)"
+
+R=$(post "/api/lessons/${LESSONS[3]}/complete" "$T_S1" '{}')
+check "completing the 4th lesson -> 4" 4 "$(printf '%s' "$R" | num completedLessons)"
+check "completing the 4th lesson -> 80%" 80 "$(printf '%s' "$R" | num progressPercent)"
+
+R=$(post "/api/lessons/${LESSONS[4]}/complete" "$T_S1" '{}')
+check "completing the 5th lesson -> 5" 5 "$(printf '%s' "$R" | num completedLessons)"
+check "completing the 5th lesson -> 100%" 100 "$(printf '%s' "$R" | num progressPercent)"
+
+check "one progress document per lesson, not per click" 5 \
+  "$(rows '/api/lesson-progresses?pagination[pageSize]=100' "$T_S1")"
+
+normalize_progress
+check "un-completing returns to 3" 3 \
+  "$(get "/api/courses/$COURSE/progress" "$T_S1" | num completedLessons)"
+
+echo
+echo "=== server-side grading ==="
+R=$(post "/api/quizzes/$FINAL_QUIZ/submit" "$T_S1" '{"answers":[0,1,2,1]}')
+check "all correct -> 100" 100 "$(printf '%s' "$R" | num score)"
+check "all correct -> 4 of 4" 4 "$(printf '%s' "$R" | num correctCount)"
+check "the final quiz is recorded" true "$(printf '%s' "$R" | grep -oP '"recorded":\K(true|false)')"
+check "per-question feedback returned" 4 "$(printf '%s' "$R" | grep -o '"correct"' | wc -l)"
+check "the graded response leaks no answer key" 0 \
+  "$(printf '%s' "$R" | grep -o correctOptionIndex | wc -l)"
+
+R=$(post "/api/quizzes/$FINAL_QUIZ/submit" "$T_S1" '{"answers":[0,1,9,9]}')
+check "two of four -> 50" 50 "$(printf '%s' "$R" | num score)"
+
+R=$(post "/api/quizzes/$PRACTICE_QUIZ/submit" "$T_S1" '{"answers":[0,1,0]}')
+check "a practice quiz is still scored" 100 "$(printf '%s' "$R" | num score)"
+check "but a practice quiz is not recorded" false \
+  "$(printf '%s' "$R" | grep -oP '"recorded":\K(true|false)')"
+
+check "one stored result, for the final quiz only" 1 \
+  "$(rows '/api/quiz-results?pagination[pageSize]=100' "$T_S1")"
+check "the stored score is the latest submission" 50 \
+  "$(get '/api/quiz-results?pagination[pageSize]=100' "$T_S1" | num latestScore)"
+
+check "a non-enrolled student cannot submit" 403 \
+  "$(status POST "/api/quizzes/$FINAL_QUIZ/submit" "$T_S2" '{"answers":[0,1,2,1]}')"
+check "an instructor cannot submit" 403 \
+  "$(status POST "/api/quizzes/$FINAL_QUIZ/submit" "$T_I1" '{"answers":[0,1,2,1]}')"
+check "a malformed submission is rejected" 400 \
+  "$(status POST "/api/quizzes/$FINAL_QUIZ/submit" "$T_S1" '{"answers":"nonsense"}')"
+
+echo
+echo "=== each role sees only its own rows ==="
+# The scope is resolved server-side and injected as a documentId allowlist; see
+# scopeQueryToDocuments. student2 and instructor2 own nothing here.
+#
+# One progress document exists per lesson — normalize_progress touches all five,
+# completing three of them — so the owner's document count is the lesson count,
+# not the completed count.
+for ep in "lesson-progresses:$TOTAL_LESSONS" quiz-results:1 enrollments:1; do
+  path=${ep%%:*}
+  own=${ep#*:}
+  check "$path — owning student" "$own" "$(rows "/api/$path?pagination[pageSize]=100" "$T_S1")"
+  check "$path — other student" 0 "$(rows "/api/$path?pagination[pageSize]=100" "$T_S2")"
+  check "$path — owning instructor" "$own" "$(rows "/api/$path?pagination[pageSize]=100" "$T_I1")"
+  check "$path — other instructor" 0 "$(rows "/api/$path?pagination[pageSize]=100" "$T_I2")"
+  check "$path — content_manager" "$own" "$(rows "/api/$path?pagination[pageSize]=100" "$T_CM")"
+  check "$path — admin" "$own" "$(rows "/api/$path?pagination[pageSize]=100" "$T_ADMIN")"
+done
+
+# The scope is intersected with the client's filters rather than merged into
+# them, so no filter a client can write widens it.
+check "a hostile client filter cannot widen the scope" 0 \
+  "$(rows '/api/lesson-progresses?filters[completed]=true&pagination[pageSize]=100' "$T_S2")"
+check "pagination meta reflects the scope, not the table" 0 \
+  "$(get '/api/lesson-progresses?pagination[pageSize]=1' "$T_S2" | num total)"
+
+echo
+echo "=== findOne ownership ==="
+check "another student cannot read a progress row" 403 \
+  "$(status GET "/api/lesson-progresses/$S1_PROGRESS" "$T_S2")"
+check "the owner can" 200 "$(status GET "/api/lesson-progresses/$S1_PROGRESS" "$T_S1")"
+check "another instructor cannot" 403 "$(status GET "/api/lesson-progresses/$S1_PROGRESS" "$T_I2")"
+check "the course's instructor can" 200 "$(status GET "/api/lesson-progresses/$S1_PROGRESS" "$T_I1")"
+check "another student cannot read an enrollment" 403 \
+  "$(status GET "/api/enrollments/$ENROLLMENT" "$T_S2")"
+check "the owner can" 200 "$(status GET "/api/enrollments/$ENROLLMENT" "$T_S1")"
+
+echo
+echo "=== progress cannot be forged ==="
+check "another student's progress is not readable" 403 \
+  "$(status GET "/api/courses/$COURSE/progress?userId=1" "$T_S2")"
+check "a non-enrolled student cannot record progress" 403 \
+  "$(status POST '/api/lesson-progresses' "$T_S2" \
+    "{\"data\":{\"lesson\":\"${LESSONS[0]}\",\"user\":1,\"completed\":true}}")"
+check "and the owner's row count is unchanged" "$TOTAL_LESSONS" \
+  "$(rows '/api/lesson-progresses?pagination[pageSize]=100' "$T_S1")"
+check "a non-enrolled student cannot complete a lesson" 403 \
+  "$(status POST "/api/lessons/${LESSONS[0]}/complete" "$T_S2" '{}')"
+check "enrolling twice is a conflict, not a second row" 409 \
+  "$(status POST '/api/enrollments' "$T_S1" "{\"data\":{\"course\":\"$COURSE\"}}")"
+
+echo
+echo "=== course, lesson and quiz ownership ==="
+# The successful writes re-send the seeded title, so a passing run leaves the
+# demo content exactly as it found it. A course has no `level` attribute — an
+# invalid key is a 400, which would fail these two for the wrong reason.
+check "the owning instructor can update the course" 200 \
+  "$(status PUT "/api/courses/$COURSE" "$T_I1" '{"data":{"title":"Intro to TypeScript"}}')"
+check "another instructor cannot" 403 \
+  "$(status PUT "/api/courses/$COURSE" "$T_I2" '{"data":{"title":"Hijacked"}}')"
+check "another instructor cannot delete it" 403 "$(status DELETE "/api/courses/$COURSE" "$T_I2")"
+check "a student cannot update it" 403 \
+  "$(status PUT "/api/courses/$COURSE" "$T_S1" '{"data":{"title":"Hijacked"}}')"
+check "an admin can update any course" 200 \
+  "$(status PUT "/api/courses/$COURSE" "$T_ADMIN" '{"data":{"title":"Intro to TypeScript"}}')"
+# Adding a lesson to someone else's course inflates its total and so distorts
+# every enrolled student's percentage.
+check "another instructor cannot add a lesson" 403 \
+  "$(status POST '/api/lessons' "$T_I2" \
+    "{\"data\":{\"title\":\"Injected\",\"course\":\"$COURSE\",\"sequenceOrder\":99}}")"
+check "another instructor cannot edit a lesson" 403 \
+  "$(status PUT "/api/lessons/${LESSONS[0]}" "$T_I2" '{"data":{"title":"Hijacked"}}')"
+# Payloads use `Question` rather than a title because a quiz has no title field;
+# an invalid key would make these fail with 400 and pass for the wrong reason.
+check "another instructor cannot edit a quiz" 403 \
+  "$(status PUT "/api/quizzes/$FINAL_QUIZ" "$T_I2" '{"data":{"Question":[]}}')"
+check "another instructor cannot attach a quiz to the course" 403 \
+  "$(status POST '/api/quizzes' "$T_I2" "{\"data\":{\"parent_course\":\"$COURSE\"}}")"
+# If one of those deletes had actually gone through, every assertion after this
+# point would fail for the wrong reason and the demo data would be gone. Fail
+# loudly here instead. It has happened: a token cache in which T_I2 held the
+# admin's JWT turned the DELETE above into a successful one.
+check "the course survived the ownership checks" 1 \
+  "$(rows "/api/courses?filters[documentId]=$COURSE" "$T_ADMIN")"
+
+echo
+echo "=== unpublished blog posts stay invisible ==="
+check "anonymous sees only published" 1 "$(rows '/api/blogs?pagination[pageSize]=100')"
+check "a student sees only published" 1 "$(rows '/api/blogs?pagination[pageSize]=100' "$T_S1")"
+check "the author sees their own draft" 2 "$(rows '/api/blogs?pagination[pageSize]=100' "$T_CM")"
+check "an admin sees every post" 2 "$(rows '/api/blogs?pagination[pageSize]=100' "$T_ADMIN")"
+# Asking for drafts returns an empty page rather than the drafts: the visibility
+# scope is intersected with the client's filter.
+check "anonymous asking for drafts gets nothing" 0 \
+  "$(rows '/api/blogs?filters[currentStatus]=draft&pagination[pageSize]=100')"
+check "a student asking for drafts gets nothing" 0 \
+  "$(rows '/api/blogs?filters[currentStatus]=draft&pagination[pageSize]=100' "$T_S1")"
+# 404 rather than 403: the existence of an unpublished post is not public either.
+check "anonymous findOne on a draft -> 404" 404 "$(status GET "/api/blogs/$DRAFT_BLOG")"
+check "a student findOne on a draft -> 404" 404 "$(status GET "/api/blogs/$DRAFT_BLOG" "$T_S1")"
+check "anonymous findOne on a published post -> 200" 200 \
+  "$(status GET "/api/blogs/$PUBLISHED_BLOG")"
+check "the author can read their own draft" 200 "$(status GET "/api/blogs/$DRAFT_BLOG" "$T_CM")"
+check "a student cannot publish a post" 403 \
+  "$(status PUT "/api/blogs/$DRAFT_BLOG/publish" "$T_S1" '{}')"
+
+echo
+echo "=== reporting endpoints ==="
+check "the course's instructor sees the roster" 200 \
+  "$(status GET "/api/courses/$COURSE/students-progress" "$T_I1")"
+check "another instructor does not" 403 \
+  "$(status GET "/api/courses/$COURSE/students-progress" "$T_I2")"
+check "a student does not" 403 \
+  "$(status GET "/api/courses/$COURSE/students-progress" "$T_S1")"
+check "an admin reads platform stats" 200 "$(status GET '/api/admin/stats' "$T_ADMIN")"
+check "an instructor does not" 403 "$(status GET '/api/admin/stats' "$T_I1")"
+check "a student does not" 403 "$(status GET '/api/admin/stats' "$T_S1")"
+
+echo
+printf 'pass=%s fail=%s\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

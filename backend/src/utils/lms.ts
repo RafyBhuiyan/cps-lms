@@ -302,6 +302,28 @@ export const scopeQuery = (ctx: Context, scope: Record<string, any>) => {
 };
 
 /**
+ * A filter no row can satisfy, for when a caller is entitled to nothing.
+ *
+ * `{ $in: [] }` cannot be used for this. The content-API sanitizer deletes empty
+ * arrays and empty plain objects from filters outright
+ * (sanitize/sanitizers.js:61-67), so an empty allowlist is not a filter that
+ * matches nothing — it is *no filter at all*, and the core controller then
+ * returns every row in the table to the one caller entitled to none. That is a
+ * fail-open default and it was observed: a student who owned no progress rows
+ * saw all of another student's.
+ *
+ * `documentId` is NOT NULL on every row, so `$null: true` selects nothing, and it
+ * survives sanitization because `true` is neither an empty array nor an empty
+ * object.
+ *
+ * Note this hazard is specific to the REST layer. The Document Service honours
+ * `$in: []` correctly, including nested through relations and inside `$or`
+ * (verified), which is why the scope objects the controllers build may still
+ * contain empty allowlists.
+ */
+const MATCHES_NOTHING = { documentId: { $null: true } } as const;
+
+/**
  * Restricts a core `find` to the documents a scope selects, expressed as an
  * opaque documentId allowlist.
  *
@@ -319,9 +341,6 @@ export const scopeQuery = (ctx: Context, scope: Record<string, any>) => {
  * controller. Pagination, sorting, sanitization and any client filters continue
  * to work untouched, and the scope no longer depends on what the caller happens
  * to be allowed to read.
- *
- * An empty result yields `$in: []`, which matches nothing (verified) — so a
- * caller with no rows sees an empty page rather than everything.
  */
 export const scopeQueryToDocuments = async (
   ctx: Context,
@@ -337,7 +356,10 @@ export const scopeQueryToDocuments = async (
 
   const documentIds = rows.map((row: any) => row.documentId);
 
-  scopeQuery(ctx, { documentId: { $in: documentIds } });
+  scopeQuery(
+    ctx,
+    documentIds.length > 0 ? { documentId: { $in: documentIds } } : MATCHES_NOTHING
+  );
 };
 
 /**
