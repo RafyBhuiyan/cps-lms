@@ -423,5 +423,41 @@ check "an instructor does not" 403 "$(status GET '/api/admin/stats' "$T_I1")"
 check "a student does not" 403 "$(status GET '/api/admin/stats' "$T_S1")"
 
 echo
+echo "=== what the frontend reads to render itself ==="
+# The UI branches on role, and neither the login response nor /users/me will give
+# it one: the login lookup runs no populate, and ?populate=role needs `find` on
+# the role type — a grant that would also expose every role's permission set.
+check "the caller's role reaches the client" authenticated \
+  "$(get '/api/profile/me' "$T_S1" | grep -oP '"type":"\K[^"]+')"
+check "and it is the caller's own role" instructor \
+  "$(get '/api/profile/me' "$T_I1" | grep -oP '"type":"\K[^"]+')"
+check "no password hash rides along" 0 \
+  "$(get '/api/profile/me' "$T_ADMIN" | grep -o 'password' | wc -l)"
+check "anonymous gets nothing" 403 "$(status GET '/api/profile/me')"
+
+# `?mine=true` exists because the client-side equivalent is impossible: filtering
+# by `creator` reaches into the user type, which the query validator rejects for
+# any role without `user.find`.
+check "an instructor's own courses" 1 "$(rows '/api/courses?mine=true&pagination[pageSize]=100' "$T_I1")"
+check "another instructor's list is empty" 0 \
+  "$(rows '/api/courses?mine=true&pagination[pageSize]=100' "$T_I2")"
+check "while the catalog itself is unchanged for them" 1 \
+  "$(rows '/api/courses?pagination[pageSize]=100' "$T_I2")"
+check "mine=true is not for anonymous callers" 401 "$(status GET '/api/courses?mine=true')"
+# The client cannot reach a student's own rows through the user relation either,
+# so these are the populates the frontend actually issues.
+check "a student may populate a lesson through progress" 200 \
+  "$(status GET '/api/lesson-progresses?populate[lesson][populate][0]=course' "$T_S1")"
+check "and a quiz through a result" 200 \
+  "$(status GET '/api/quiz-results?populate=quiz' "$T_S1")"
+check "but not the user relation" 400 \
+  "$(status GET '/api/quiz-results?filters[user][id]=2' "$T_S1")"
+# Populating `user` is not an error — the sanitizer silently drops the relation
+# rather than rejecting the request, so what matters is that no account detail
+# rides along with the row.
+check "and populating it yields no account data" 0 \
+  "$(get '/api/quiz-results?populate=user' "$T_S1" | grep -oE '"(email|username)"' | wc -l)"
+
+echo
 printf 'pass=%s fail=%s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
