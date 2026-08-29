@@ -302,6 +302,45 @@ export const scopeQuery = (ctx: Context, scope: Record<string, any>) => {
 };
 
 /**
+ * Restricts a core `find` to the documents a scope selects, expressed as an
+ * opaque documentId allowlist.
+ *
+ * The indirection is not optional. Injecting a relation filter directly — say
+ * `{ user: { id: 7 } }` — is rejected with `400 Invalid key user` unless the
+ * *caller's* role holds `find` on the relation's target content type
+ * (validate/visitors/throw-restricted-relations.js). Scoping a student's own
+ * progress goes through `user`, whose target is the users-permissions user, and
+ * granting students `plugin::users-permissions.user.find` to satisfy the
+ * validator would let them enumerate every account on the platform — a far worse
+ * problem than the one being solved.
+ *
+ * So the scope is resolved here with the Document Service, which performs no
+ * permission validation, and only the resulting ids are handed to the core
+ * controller. Pagination, sorting, sanitization and any client filters continue
+ * to work untouched, and the scope no longer depends on what the caller happens
+ * to be allowed to read.
+ *
+ * An empty result yields `$in: []`, which matches nothing (verified) — so a
+ * caller with no rows sees an empty page rather than everything.
+ */
+export const scopeQueryToDocuments = async (
+  ctx: Context,
+  uid: UID.ContentType,
+  scope: Record<string, any>
+) => {
+  const rows = await docs(uid).findMany({
+    filters: scope,
+    fields: ['id'],
+    limit: NO_LIMIT,
+    ...ANY_VERSION,
+  });
+
+  const documentIds = rows.map((row: any) => row.documentId);
+
+  scopeQuery(ctx, { documentId: { $in: documentIds } });
+};
+
+/**
  * Scope matching quizzes belonging to any of the given courses, by either of the
  * two course relations.
  */

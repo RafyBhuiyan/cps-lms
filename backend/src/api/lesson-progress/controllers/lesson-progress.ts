@@ -9,7 +9,7 @@ import {
   ANY_VERSION,
   isEnrolled,
   manageableCourseIds,
-  scopeQuery,
+  scopeQueryToDocuments,
   upsertOne,
 } from '../../../utils/lms';
 
@@ -43,7 +43,11 @@ export default factories.createCoreController(
       const scope = await scopeForUser(user);
 
       if (scope) {
-        scopeQuery(ctx, scope);
+        await scopeQueryToDocuments(
+          ctx,
+          'api::lesson-progress.lesson-progress',
+          scope
+        );
       }
 
       return super.find(ctx);

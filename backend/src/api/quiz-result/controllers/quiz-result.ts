@@ -9,7 +9,7 @@ import {
   ANY_VERSION,
   manageableCourseIds,
   quizzesOfCourses,
-  scopeQuery,
+  scopeQueryToDocuments,
 } from '../../../utils/lms';
 
 /**
@@ -45,7 +45,7 @@ export default factories.createCoreController('api::quiz-result.quiz-result', ()
     const scope = await scopeForUser(user);
 
     if (scope) {
-      scopeQuery(ctx, scope);
+      await scopeQueryToDocuments(ctx, 'api::quiz-result.quiz-result', scope);
     }
 
     return super.find(ctx);

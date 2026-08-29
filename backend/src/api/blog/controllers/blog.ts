@@ -5,7 +5,7 @@
 import { factories } from '@strapi/strapi';
 import type { Context } from 'koa';
 import { isAdmin, isContentManager, type AuthUser } from '../../../utils/roles';
-import { ANY_VERSION, PUBLISHED, scopeQuery } from '../../../utils/lms';
+import { ANY_VERSION, PUBLISHED, scopeQueryToDocuments } from '../../../utils/lms';
 
 /**
  * The blog is public, so `find`/`findOne` are reachable without a token. Only
@@ -41,7 +41,11 @@ export default factories.createCoreController('api::blog.blog', () => ({
     const scope = draftScopeFor(ctx.state.user);
 
     if (scope) {
-      scopeQuery(ctx, scope);
+      // Resolved server-side rather than injected as a filter: the
+      // content_manager branch reaches through `author` into the
+      // users-permissions user, which the query validator would reject for any
+      // role lacking `user.find`. See `scopeQueryToDocuments`.
+      await scopeQueryToDocuments(ctx, 'api::blog.blog', scope);
     }
 
     return super.find(ctx);

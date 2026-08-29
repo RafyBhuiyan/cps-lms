@@ -9,7 +9,7 @@ import {
   ANY_VERSION,
   findEnrollment,
   manageableCourseIds,
-  scopeQuery,
+  scopeQueryToDocuments,
 } from '../../../utils/lms';
 
 /**
@@ -40,7 +40,7 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
     const scope = await scopeForUser(user);
 
     if (scope) {
-      scopeQuery(ctx, scope);
+      await scopeQueryToDocuments(ctx, 'api::enrollment.enrollment', scope);
     }
 
     return super.find(ctx);
