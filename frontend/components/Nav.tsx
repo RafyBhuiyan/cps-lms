@@ -33,9 +33,9 @@ export function Nav() {
 
   if (isStudent(user)) links.push({ href: '/dashboard/student', label: 'My learning' });
   if (isInstructor(user)) links.push({ href: '/dashboard/instructor', label: 'Teaching' });
-  if (isContentManager(user)) links.push({ href: '/dashboard/manager', label: 'Posts' });
+  if (isContentManager(user)) links.push({ href: '/dashboard/manager', label: 'Content' });
   if (isAdmin(user)) {
-    links.push({ href: '/dashboard/manager', label: 'Posts' });
+    links.push({ href: '/dashboard/manager', label: 'Content' });
     links.push({ href: '/dashboard/admin', label: 'Platform' });
   }
 
