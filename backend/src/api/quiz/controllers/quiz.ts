@@ -10,6 +10,7 @@ import {
   isEnrolled,
   resolveQuizCourse,
   upsertOne,
+  withholdCourseContent,
 } from '../../../utils/lms';
 
 type Question = {
@@ -19,6 +20,30 @@ type Question = {
 };
 
 export default factories.createCoreController('api::quiz.quiz', () => ({
+  /**
+   * GET /api/quizzes
+   *
+   * The catalog of quizzes, minus the questions of any quiz whose course the
+   * caller is not enrolled in. A quiz's *existence* is not a secret — the course
+   * page says a final quiz is there — but its questions are, and they stay
+   * withheld until the student is enrolled and taking it.
+   *
+   * See `withholdCourseContent` for why this is done to the response rather than
+   * to the `populate` query.
+   */
+  async find(ctx: Context) {
+    const response = await super.find(ctx);
+    await withholdCourseContent(ctx.state.user, response, 'quiz');
+    return response;
+  },
+
+  /** GET /api/quizzes/:documentId — same withholding as `find`. */
+  async findOne(ctx: Context) {
+    const response = await super.findOne(ctx);
+    await withholdCourseContent(ctx.state.user, response, 'quiz');
+    return response;
+  },
+
   /**
    * POST /api/quizzes/:documentId/submit
    *

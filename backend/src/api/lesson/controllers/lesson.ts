@@ -12,9 +12,34 @@ import {
   isEnrolled,
   lessonQuizGate,
   upsertOne,
+  withholdCourseContent,
 } from '../../../utils/lms';
 
 export default factories.createCoreController('api::lesson.lesson', () => ({
+  /**
+   * GET /api/lessons
+   *
+   * Titles and sequence for anyone; `content` and `videoUrl` only for a caller
+   * with an active enrolment in the lesson's course, or for staff. The lesson list
+   * is how a student decides whether a course is worth requesting — that needs the
+   * shape, not the material.
+   *
+   * See `withholdCourseContent` for why this is done to the response rather than
+   * to the `populate` query.
+   */
+  async find(ctx: Context) {
+    const response = await super.find(ctx);
+    await withholdCourseContent(ctx.state.user, response, 'lesson');
+    return response;
+  },
+
+  /** GET /api/lessons/:documentId — same withholding as `find`. */
+  async findOne(ctx: Context) {
+    const response = await super.findOne(ctx);
+    await withholdCourseContent(ctx.state.user, response, 'lesson');
+    return response;
+  },
+
   /**
    * POST /api/lessons/:documentId/complete
    *

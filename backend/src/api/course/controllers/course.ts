@@ -15,6 +15,7 @@ import {
   isEnrollmentActive,
   scopeQueryToDocuments,
   uniqueSlug,
+  withholdCourseContent,
 } from '../../../utils/lms';
 
 /**
@@ -63,30 +64,47 @@ export default factories.createCoreController('api::course.course', () => ({
    *
    * `mine` is removed from the query before delegating; it is not a content-API
    * key, and leaving it in place would risk a 400 from the query validator.
+   *
+   * Both paths converge on one `super.find` so that the withholding below cannot
+   * be skipped by taking the `mine` branch — a course list can populate `lessons`,
+   * and from there reach every lesson body and quiz question in it.
    */
   async find(ctx: Context) {
     const query = ctx.query as Record<string, unknown>;
     const mine = query.mine;
 
-    if (mine === undefined) {
-      return super.find(ctx);
+    if (mine !== undefined) {
+      delete query.mine;
+
+      const { user } = ctx.state;
+
+      if (!user) {
+        return ctx.unauthorized('You must be logged in to list your own courses.');
+      }
+
+      if (mine === 'true' || mine === '1' || mine === true) {
+        await scopeQueryToDocuments(ctx, 'api::course.course', {
+          $or: [{ creator: { id: user.id } }, { instructors: { id: user.id } }],
+        });
+      }
     }
 
-    delete query.mine;
+    const response = await super.find(ctx);
+    await withholdCourseContent(ctx.state.user, response);
+    return response;
+  },
 
-    const { user } = ctx.state;
-
-    if (!user) {
-      return ctx.unauthorized('You must be logged in to list your own courses.');
-    }
-
-    if (mine === 'true' || mine === '1' || mine === true) {
-      await scopeQueryToDocuments(ctx, 'api::course.course', {
-        $or: [{ creator: { id: user.id } }, { instructors: { id: user.id } }],
-      });
-    }
-
-    return super.find(ctx);
+  /**
+   * GET /api/courses/:documentId
+   *
+   * Overridden only to withhold content the caller has not enrolled in. This is
+   * the request the course page makes, and it populates `lessons`, `final_quiz`
+   * and `practice_quizzes` — so it is the widest of the three routes.
+   */
+  async findOne(ctx: Context) {
+    const response = await super.findOne(ctx);
+    await withholdCourseContent(ctx.state.user, response);
+    return response;
   },
 
   /**

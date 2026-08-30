@@ -14,6 +14,7 @@ import {
   findEnrollment,
   manageableCourseIds,
   scopeQueryToDocuments,
+  withholdCourseContent,
   type EnrollmentStatus,
 } from '../../../utils/lms';
 
@@ -95,6 +96,15 @@ const decide = async (ctx: Context, next: EnrollmentStatus, verb: string) => {
 };
 
 export default factories.createCoreController('api::enrollment.enrollment', () => ({
+  /**
+   * GET /api/enrollments
+   *
+   * Scoped to the caller's own rows, and — less obviously — stripped of any course
+   * content those rows reach. An enrolment carries a `course` relation, so
+   * `?populate[course][populate][0]=lessons` reads a whole course through it, and a
+   * student's *pending* request is a row they own. Without the withholding below,
+   * requesting enrolment in a course would be enough to read it.
+   */
   async find(ctx: Context) {
     const { user } = ctx.state;
 
@@ -108,7 +118,9 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
       await scopeQueryToDocuments(ctx, 'api::enrollment.enrollment', scope);
     }
 
-    return super.find(ctx);
+    const response = await super.find(ctx);
+    await withholdCourseContent(user, response);
+    return response;
   },
 
   async findOne(ctx: Context) {
@@ -141,7 +153,9 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
       }
     }
 
-    return super.findOne(ctx);
+    const response = await super.findOne(ctx);
+    await withholdCourseContent(user, response);
+    return response;
   },
 
   /**

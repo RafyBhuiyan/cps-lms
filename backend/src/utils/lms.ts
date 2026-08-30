@@ -147,18 +147,28 @@ export const uniqueSlug = async (
  * without it `submit` answers `400 This quiz is not linked to a course` and a
  * lesson quiz can never be graded at all.
  */
+const QUIZ_COURSE_POPULATE = {
+  course: true,
+  parent_course: true,
+  lesson: { populate: ['course'] },
+} as const;
+
+/**
+ * Applies the rule above to an already-populated quiz. Factored out because two
+ * callers need it — `resolveQuizCourse` for grading one quiz, and `quizCourseMap`
+ * for deciding visibility across a page of them — and a quiz that resolved
+ * differently in the two would be gradeable but invisible, or vice versa.
+ */
+const courseOfQuiz = (quiz: any) =>
+  quiz?.course ?? quiz?.parent_course ?? quiz?.lesson?.course ?? null;
+
 export const resolveQuizCourse = async (quizDocumentId: string) => {
   const quiz = await docs('api::quiz.quiz').findOne({
     documentId: quizDocumentId,
     // correctOptionIndex is `private`, which only strips it from REST output —
     // the Document Service still returns it, which is what makes server-side
     // grading possible.
-    populate: {
-      Question: true,
-      course: true,
-      parent_course: true,
-      lesson: { populate: ['course'] },
-    },
+    populate: { Question: true, ...QUIZ_COURSE_POPULATE },
     ...PUBLISHED,
   });
 
@@ -166,14 +176,11 @@ export const resolveQuizCourse = async (quizDocumentId: string) => {
     return { quiz: null, course: null, isFinal: false, isLesson: false };
   }
 
-  const isFinal = Boolean(quiz.course);
-  const isLesson = Boolean(quiz.lesson);
-
   return {
     quiz,
-    course: quiz.course ?? quiz.parent_course ?? quiz.lesson?.course ?? null,
-    isFinal,
-    isLesson,
+    course: courseOfQuiz(quiz),
+    isFinal: Boolean(quiz.course),
+    isLesson: Boolean(quiz.lesson),
   };
 };
 
@@ -314,6 +321,261 @@ export const isEnrollmentActive = (enrollment: any): boolean => {
  */
 export const isEnrolled = async (userId: number, courseDocumentId: string) =>
   isEnrollmentActive(await findEnrollment(userId, courseDocumentId));
+
+/* -------------------------------------------------------------------------- */
+/* Content visibility                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Which courses a caller may read the *inside* of.
+ *
+ * The distinction this file draws is between a course's shape — its title, its
+ * lesson titles, which lessons carry a quiz — and its contents: lesson bodies and
+ * quiz questions. The shape is the catalog and stays public. The contents are what
+ * enrolment buys, and questions in particular are only ever meant to be seen while
+ * actually taking the quiz.
+ *
+ * `'all'` for staff, who have to preview their own material before publishing it
+ * and whose authoring screens are unusable without it. For a student, an allowlist
+ * of the courses whose enrolment is *active* — a pending or rejected request is not
+ * an enrolment, so it buys the shape and nothing more.
+ *
+ * Fail-closed by construction: only the three staff role types widen to `'all'`, so
+ * a role added in the dashboard later starts out seeing titles rather than every
+ * exam on the platform.
+ */
+export type CourseReadScope = 'all' | Set<string>;
+
+export const courseReadScope = async (user: AuthUser): Promise<CourseReadScope> => {
+  if (isPrivileged(user) || isInstructor(user)) {
+    return 'all';
+  }
+
+  if (!user) {
+    return new Set<string>();
+  }
+
+  const enrollments = await docs('api::enrollment.enrollment').findMany({
+    filters: { user: { id: user.id } },
+    populate: ['course'],
+    limit: NO_LIMIT,
+    ...ANY_VERSION,
+  });
+
+  return new Set<string>(
+    enrollments
+      .filter(isEnrollmentActive)
+      .map((enrollment: any) => enrollment.course?.documentId)
+      .filter((id: unknown): id is string => typeof id === 'string')
+  );
+};
+
+/**
+ * Whether a scope reaches inside one course.
+ *
+ * A null course id answers false rather than true: a lesson or quiz linked to no
+ * course cannot be reached by any enrolment, so nobody but staff has a claim on it.
+ */
+export const mayReadInside = (
+  scope: CourseReadScope,
+  courseDocumentId: string | null | undefined
+) => scope === 'all' || (typeof courseDocumentId === 'string' && scope.has(courseDocumentId));
+
+/**
+ * Strips a lesson's body from a REST payload, in place.
+ *
+ * `videoUrl` goes with `content`. For a video lesson the video *is* the lesson, so
+ * withholding the prose and leaving the link would gate nothing.
+ */
+export const hideLessonBody = (lesson: any) => {
+  delete lesson.content;
+  delete lesson.videoUrl;
+};
+
+/** Strips a quiz's questions from a REST payload, in place. */
+export const hideQuizQuestions = (quiz: any) => {
+  delete quiz.Question;
+};
+
+/** documentId → its course's documentId, for many lessons in one query. */
+export const lessonCourseMap = async (lessonDocumentIds: string[]) => {
+  const map = new Map<string, string | null>();
+
+  if (lessonDocumentIds.length === 0) {
+    return map;
+  }
+
+  const lessons = await docs('api::lesson.lesson').findMany({
+    filters: { documentId: { $in: lessonDocumentIds } },
+    fields: ['id'],
+    populate: ['course'],
+    limit: NO_LIMIT,
+    // ANY_VERSION to match `courseIdOfLesson`, the existing answer to this same
+    // question. It also fails safe in the direction that matters: finding the link
+    // on either version keeps content visible to a student entitled to it, where
+    // missing it would lock them out of a course they are enrolled in.
+    ...ANY_VERSION,
+  });
+
+  for (const lesson of lessons) {
+    map.set(lesson.documentId, (lesson as any).course?.documentId ?? null);
+  }
+
+  return map;
+};
+
+/** documentId → its course's documentId, for many quizzes in one query. */
+export const quizCourseMap = async (quizDocumentIds: string[]) => {
+  const map = new Map<string, string | null>();
+
+  if (quizDocumentIds.length === 0) {
+    return map;
+  }
+
+  const quizzes = await docs('api::quiz.quiz').findMany({
+    filters: { documentId: { $in: quizDocumentIds } },
+    fields: ['id'],
+    populate: QUIZ_COURSE_POPULATE,
+    limit: NO_LIMIT,
+    ...ANY_VERSION,
+  });
+
+  for (const quiz of quizzes) {
+    map.set(quiz.documentId, courseOfQuiz(quiz)?.documentId ?? null);
+  }
+
+  return map;
+};
+
+/**
+ * The relation keys that carry a lesson or a quiz, taken from the schemas rather
+ * than guessed: `Course.lessons`, `LessonProgress.lesson`, `Quiz.lesson` and
+ * `Course.final_quiz`, `Course.practice_quizzes`, `Lesson.quiz`, `QuizResult.quiz`.
+ */
+const LESSON_RELATIONS = new Set(['lesson', 'lessons']);
+const QUIZ_RELATIONS = new Set(['quiz', 'final_quiz', 'practice_quizzes']);
+
+type NodeKind = 'lesson' | 'quiz' | 'other';
+
+/**
+ * Collects every lesson and quiz node in a response payload, at any depth,
+ * identifying them by the relation key they hang from.
+ */
+const gatherContentNodes = (
+  value: unknown,
+  kind: NodeKind,
+  found: { lessons: any[]; quizzes: any[] },
+  seen: WeakSet<object>
+) => {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      gatherContentNodes(item, kind, found, seen);
+    }
+    return;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+
+  // Strapi can hand back the same object for the same document at two positions
+  // in one payload; without this the node would be redacted twice, and a genuine
+  // cycle would not terminate.
+  if (seen.has(value)) {
+    return;
+  }
+  seen.add(value);
+
+  if (kind === 'lesson') {
+    found.lessons.push(value);
+  } else if (kind === 'quiz') {
+    found.quizzes.push(value);
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (!child || typeof child !== 'object') {
+      continue;
+    }
+
+    gatherContentNodes(
+      child,
+      LESSON_RELATIONS.has(key) ? 'lesson' : QUIZ_RELATIONS.has(key) ? 'quiz' : 'other',
+      found,
+      seen
+    );
+  }
+};
+
+/**
+ * Withholds lesson bodies and quiz questions from a REST response, for every
+ * course the caller is not enrolled in.
+ *
+ * Applied to the *response* rather than to the incoming `populate` query, and that
+ * is the whole design. REST populate nests to arbitrary depth, so a query-shaped
+ * guard would have to anticipate every way of asking — and there are many:
+ * `courses/:id?populate[lessons][populate][quiz][populate][0]=Question` reaches a
+ * lesson quiz's questions three levels down, and a student's own *pending*
+ * enrolment row reaches an entire course through `populate[course]`. Redacting
+ * what actually came back needs to know only the schema's relation names, which
+ * cannot be routed around.
+ *
+ * `transformResponse` has already run by the time a controller has a response in
+ * hand, so these are plain sanitized objects and mutating them is safe. Nothing
+ * here touches the Document Service, so `submit`, `lessonQuizGate` and
+ * `computeCourseProgress` still read questions and answer keys as before — grading
+ * and the completion gate are unaffected.
+ *
+ * `rootKind` names what the payload's own `data` is, since the top level hangs from
+ * no relation key: `'lesson'` for the lesson controller, `'quiz'` for the quiz
+ * controller, `'other'` everywhere else.
+ */
+export const withholdCourseContent = async (
+  user: AuthUser,
+  response: unknown,
+  rootKind: NodeKind = 'other'
+): Promise<void> => {
+  const data = (response as { data?: unknown } | null | undefined)?.data;
+
+  if (!data || typeof data !== 'object') {
+    return;
+  }
+
+  const found = { lessons: [] as any[], quizzes: [] as any[] };
+  gatherContentNodes(data, rootKind, found, new WeakSet());
+
+  // The common case — a catalog listing populates neither — costs no queries.
+  if (found.lessons.length === 0 && found.quizzes.length === 0) {
+    return;
+  }
+
+  const scope = await courseReadScope(user);
+
+  if (scope === 'all') {
+    return;
+  }
+
+  const documentIdsOf = (nodes: any[]) =>
+    nodes
+      .map((node) => node.documentId)
+      .filter((id: unknown): id is string => typeof id === 'string');
+
+  const [lessonCourses, quizCourses] = await Promise.all([
+    lessonCourseMap(documentIdsOf(found.lessons)),
+    quizCourseMap(documentIdsOf(found.quizzes)),
+  ]);
+
+  for (const lesson of found.lessons) {
+    if (!mayReadInside(scope, lessonCourses.get(lesson.documentId))) {
+      hideLessonBody(lesson);
+    }
+  }
+
+  for (const quiz of found.quizzes) {
+    if (!mayReadInside(scope, quizCourses.get(quiz.documentId))) {
+      hideQuizQuestions(quiz);
+    }
+  }
+};
 
 /* -------------------------------------------------------------------------- */
 /* Course ownership                                                           */

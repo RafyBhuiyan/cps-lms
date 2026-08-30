@@ -156,11 +156,15 @@ Nothing you authored in the dashboard comes across; you get the demo data instea
    cd backend && DATABASE_CLIENT=postgres DATABASE_URL='<DATABASE_PUBLIC_URL>' DATABASE_SSL=true DATABASE_SSL_REJECT_UNAUTHORIZED=false npm run permissions
    ```
 
-   Then the same line with `npm run seed`.
+   Then the same line with `npm run seed`, and optionally `npm run seed:courses`
+   for three more courses (C++, Java, DSA) with lessons, a gated lesson quiz, a
+   final quiz and a practice quiz each. That one adds catalog content only — no
+   users, enrolments or progress — and is safe to re-run.
 
-3. Finally the same line with `npm run backfill:enrollments`. A fresh seed writes a
-   status on every enrolment it creates, so this finds nothing — run it anyway, so
-   the one command sequence works whichever branch you took.
+3. Finally the same line with `npm run backfill:enrollments`. `seed.js` writes no
+   status on the enrolment it creates, so this has one row to fix; on a
+   transferred database it has however many predate the field. Idempotent either
+   way, so the one command sequence works whichever branch you took.
 
 Either way: the demo accounts (`student`, `instructor`, `cm`, `admin`
 `@demo.test`) share one password that is committed in `scripts/seed.js`. On a

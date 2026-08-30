@@ -121,6 +121,11 @@ function QuizView() {
   const { quiz, kind, courseId, courseTitle, enrolled, progress } = data;
   const questions = quiz.Question ?? [];
 
+  // Whether the API withheld the questions. A student without an active enrolment
+  // gets none, so there is nothing to render and nothing to submit — the panel
+  // below explains that instead. Staff are never withheld: they need the preview.
+  const withheld = isStudent(user) && !enrolled;
+
   /** This quiz's entry in the progress payload, for a lesson quiz. */
   const gatedLesson =
     kind === 'lesson'
@@ -199,7 +204,12 @@ function QuizView() {
           </Panel>
         ) : null}
 
-        {questions.length === 0 ? (
+        {withheld ? (
+          /* Nothing where the questions were. The API withheld them, and saying
+             "no questions yet" here would blame the instructor for the gate — so
+             the enrolment panel above is the whole answer. */
+          null
+        ) : questions.length === 0 ? (
           <Empty>This quiz has no questions yet.</Empty>
         ) : isStudent(user) && enrolled && token ? (
           <QuizRunner
@@ -209,14 +219,13 @@ function QuizView() {
             onGraded={setJustGraded}
           />
         ) : (
-          /* Read-only view: the questions as authored, with no way to submit.
-             Instructors and editors land here — useful for checking a quiz reads
+          /* Read-only view: the questions as authored, with no way to submit. Only
+             instructors and editors reach it — useful for checking a quiz reads
              correctly, and it cannot leak the key, which never left the server. */
           <Panel title={`Questions (${questions.length})`}>
             <p className={`mb-4 ${muted}`}>
-              {isStudent(user)
-                ? 'Enrol to answer these.'
-                : 'Only students can submit attempts, so this is a preview. The correct answers are private to the API and are not in this response.'}
+              Only students can submit attempts, so this is a preview. The correct
+              answers are private to the API and are not in this response.
             </p>
             <ol className="space-y-4">
               {questions.map((question, index) => (

@@ -68,18 +68,20 @@ function LessonView() {
       const courseId = lesson.course?.documentId ?? null;
 
       if (!courseId || !isStudent(user)) {
-        return { lesson, courseId, enrolled: false, progress: null };
+        return { lesson, courseId, enrolled: false, requestState: null, progress: null };
       }
 
       const enrollments = await api.listEnrollments(token);
-      const enrolled = isEnrollmentActive(
-        enrollments.find((row) => row.course?.documentId === courseId)
-      );
+      const enrollment = enrollments.find((row) => row.course?.documentId === courseId);
+      const enrolled = isEnrollmentActive(enrollment);
 
       return {
         lesson,
         courseId,
         enrolled,
+        // Kept so the page can say *why* the content is closed — a request waiting
+        // on the instructor reads very differently from one that was declined.
+        requestState: enrollment?.current_status ?? null,
         // Own progress is readable whether or not enrolled, and it carries the
         // sibling lessons this page uses for its previous/next links as well as
         // the quiz state for each.
@@ -131,13 +133,20 @@ function LessonView() {
     );
   }
 
-  const { lesson, courseId, enrolled, progress } = data;
+  const { lesson, courseId, enrolled, requestState, progress } = data;
   const siblings = progress?.lessons ?? [];
   const index = siblings.findIndex((l) => l.documentId === lessonId);
   const previous = index > 0 ? siblings[index - 1] : null;
   const next = index >= 0 && index < siblings.length - 1 ? siblings[index + 1] : null;
   const current = index >= 0 ? siblings[index] : null;
   const completed = current?.completed ?? false;
+
+  // Whether the API withheld this lesson's body, and so whether to explain that
+  // rather than render an empty `Blocks`.
+  //
+  // The `isStudent` half is what keeps authoring working: an instructor previewing
+  // a lesson is not enrolled either, and the server sends them the full body.
+  const withheld = isStudent(user) && !enrolled;
 
   // The quiz to show, and whether it locks this lesson.
   //
@@ -221,20 +230,40 @@ function LessonView() {
         ) : null}
 
         <Panel>
-          {lesson.videoUrl ? (
-            <p className="mb-4">
-              <a
-                href={lesson.videoUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={btnSecondary}
-              >
-                Watch the video ↗
-              </a>
-            </p>
-          ) : null}
+          {withheld ? (
+            <>
+              <p>This lesson&rsquo;s content is available once your enrolment is approved.</p>
+              <p className={`mt-2 ${muted}`}>
+                {requestState === 'pending'
+                  ? 'Your request is with the instructor.'
+                  : requestState === 'rejected'
+                    ? 'Your request was declined, so the material stays closed.'
+                    : 'Request enrolment from the course page to get started.'}
+              </p>
+              {courseId ? (
+                <Link href={`/courses/${courseId}`} className={`${btnPrimary} mt-3`}>
+                  Go to the course
+                </Link>
+              ) : null}
+            </>
+          ) : (
+            <>
+              {lesson.videoUrl ? (
+                <p className="mb-4">
+                  <a
+                    href={lesson.videoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={btnSecondary}
+                  >
+                    Watch the video ↗
+                  </a>
+                </p>
+              ) : null}
 
-          <Blocks content={lesson.content} />
+              <Blocks content={lesson.content} />
+            </>
+          )}
         </Panel>
 
         {quizId ? (
@@ -249,13 +278,21 @@ function LessonView() {
             }
           >
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className={muted}>{quizNote}</p>
-              <Link
-                href={`/quizzes/${quizId}`}
-                className={locked ? btnPrimary : btnSecondary}
-              >
-                {quizScore === null ? 'Take the quiz' : 'Take it again'}
-              </Link>
+              <p className={muted}>
+                {withheld
+                  ? 'This lesson has a quiz. It opens once your enrolment is approved.'
+                  : quizNote}
+              </p>
+              {/* No link while the content is withheld: the questions are withheld
+                  with it, so the quiz page would have nothing to show. */}
+              {withheld ? null : (
+                <Link
+                  href={`/quizzes/${quizId}`}
+                  className={locked ? btnPrimary : btnSecondary}
+                >
+                  {quizScore === null ? 'Take the quiz' : 'Take it again'}
+                </Link>
+              )}
             </div>
           </Panel>
         ) : null}

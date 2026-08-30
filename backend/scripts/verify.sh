@@ -301,6 +301,68 @@ check "questions still returned to the student" 4 \
 check "options still returned to the student" 4 \
   "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_S1" | grep -o '"options"' | wc -l)"
 
+# --------------------------------------------------------------------------- #
+echo
+echo "=== the inside of a course is what enrolment buys ==="
+# A course's *shape* — its lessons' titles, which of them carry a quiz, that a
+# final and a practice quiz exist — is the catalog and stays readable. Its
+# contents are not: lesson bodies, and above all quiz questions, which are only
+# ever meant to be seen while actually taking the quiz.
+#
+# T_S2 is enrolled in nothing, which is the case that was leaking: `public` holds
+# neither lesson.find nor quiz.find, so an anonymous caller never had the relations
+# at all, but any signed-in account did.
+check "an unenrolled student gets no questions" 0 \
+  "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "nor the options they choose between" 0 \
+  "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_S2" | grep -o '"options"' | wc -l)"
+check "nor every quiz on the platform at once" 0 \
+  "$(get '/api/quizzes?populate[Question]=true&pagination[pageSize]=100' "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "nor a lesson body" 0 \
+  "$(get "/api/lessons/${LESSONS[0]}" "$T_S2" | grep -o '"content"' | wc -l)"
+check "nor one reached through the course" 0 \
+  "$(get "/api/courses/$COURSE?populate[lessons]=true" "$T_S2" | grep -o '"content"' | wc -l)"
+
+# REST populate nests to arbitrary depth, which is why the gate is applied to the
+# response and not to the incoming query: a query-shaped guard would have to
+# anticipate every one of these separately, and they are not a closed set.
+check "nor through a deep populate to the final quiz" 0 \
+  "$(get "/api/courses/$COURSE?populate[final_quiz][populate][0]=Question" "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "nor through the practice quiz" 0 \
+  "$(get "/api/courses/$COURSE?populate[practice_quizzes][populate][0]=Question" "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "nor by looping back from a quiz to its course's lessons" 0 \
+  "$(get "/api/quizzes/$FINAL_QUIZ?populate[course][populate][0]=lessons" "$T_S2" | grep -o '"content"' | wc -l)"
+# The lesson-quiz chain (`course→lessons→quiz→Question`) is asserted in the smoke
+# section instead: the seeded course has no lesson quizzes, so the same check here
+# would pass with the gate removed entirely.
+
+# The shape genuinely must survive: it is what a student reads to decide whether
+# the course is worth requesting.
+check "but every lesson still arrives, titled and ordered" "$TOTAL_LESSONS" \
+  "$(get "/api/courses/$COURSE?populate[lessons]=true" "$T_S2" | grep -o '"sequenceOrder"' | wc -l)"
+check "and the quiz is still listed as existing" 1 \
+  "$(rows "/api/quizzes?filters[documentId]=$FINAL_QUIZ" "$T_S2")"
+
+# Over-redaction is the other half of the bug, and the more expensive one: an
+# instructor who cannot read their own material cannot check it before publishing,
+# and the authoring screens stop working.
+check "the course's instructor still reads the questions" 4 \
+  "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_I1" | grep -o '"questionText"' | wc -l)"
+check "and an admin does too" 4 \
+  "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_ADMIN" | grep -o '"questionText"' | wc -l)"
+check "the instructor still reads the lesson body" 1 \
+  "$(get "/api/lessons/${LESSONS[0]}" "$T_I1" | grep -o '"content"' | wc -l)"
+check "and every body in the course at once" "$TOTAL_LESSONS" \
+  "$(get "/api/courses/$COURSE?populate[lessons]=true" "$T_ADMIN" | grep -o '"content"' | wc -l)"
+# The twin of the deep-populate checks above: without this they would still pass if
+# the chain simply did not resolve, and a guard that is never reached is not a guard.
+check "and the deep populate does resolve for them" 4 \
+  "$(get "/api/courses/$COURSE?populate[final_quiz][populate][0]=Question" "$T_ADMIN" \
+    | grep -o '"questionText"' | wc -l)"
+# The enrolled student, who is the whole point: same request, same course, allowed.
+check "the enrolled student reads the bodies too" "$TOTAL_LESSONS" \
+  "$(get "/api/courses/$COURSE?populate[lessons]=true" "$T_S1" | grep -o '"content"' | wc -l)"
+
 echo
 echo "=== progress tracking ==="
 P=$(get "/api/courses/$COURSE/progress" "$T_S1")
@@ -515,11 +577,17 @@ check "anonymous gets nothing" 403 "$(status GET '/api/profile/me')"
 # `?mine=true` exists because the client-side equivalent is impossible: filtering
 # by `creator` reaches into the user type, which the query validator rejects for
 # any role without `user.find`.
-check "an instructor's own courses" 1 "$(rows '/api/courses?mine=true&pagination[pageSize]=100' "$T_I1")"
+#
+# Scoped to the seeded slug rather than counting the catalog, because the catalog is
+# not this suite's to predict — `npm run seed:courses` adds three more, and a real
+# instance will have whatever its instructors have written. instructor2's list stays
+# an unfiltered 0: it owns nothing anywhere, which is the stronger half of the claim.
+check "an instructor's own courses include the one they created" 1 \
+  "$(rows "/api/courses?mine=true&filters[slug]=$COURSE_SLUG&pagination[pageSize]=100" "$T_I1")"
 check "another instructor's list is empty" 0 \
   "$(rows '/api/courses?mine=true&pagination[pageSize]=100' "$T_I2")"
-check "while the catalog itself is unchanged for them" 1 \
-  "$(rows '/api/courses?pagination[pageSize]=100' "$T_I2")"
+check "while the catalog itself still carries it for them" 1 \
+  "$(rows "/api/courses?filters[slug]=$COURSE_SLUG&pagination[pageSize]=100" "$T_I2")"
 check "mine=true is not for anonymous callers" 401 "$(status GET '/api/courses?mine=true')"
 # The client cannot reach a student's own rows through the user relation either,
 # so these are the populates the frontend actually issues.
@@ -577,6 +645,12 @@ echo "=== creating a course and enrolling attach an owner ==="
 # were returning `400 Invalid key <field>`. Ownership is stamped through the
 # Document Service after the row exists, so these assert the attribution and not
 # merely a 2xx: a course with no creator is one its own author cannot edit.
+# How big the catalog is before this section adds to it. The cleanup at the end
+# asserts the same number again — an absolute count would only ever be right on a
+# pristine seed, and what actually matters is that nothing this suite created
+# outlives it.
+CATALOG_BEFORE=$(rows '/api/courses?pagination[pageSize]=100' "$T_S1")
+
 SMOKE_COURSE=$(post '/api/courses' "$T_I2" \
   '{"data":{"title":"Ownership Smoke Course","description":"Created by verify.sh."}}')
 SMOKE_COURSE_ID=$(printf '%s' "$SMOKE_COURSE" | grep -oP '"documentId":"\K[^"]+' | head -1)
@@ -645,6 +719,26 @@ check "a pending student cannot complete a lesson" 403 \
   "$(status POST "/api/lessons/$SMOKE_LESSON_ID/complete" "$T_S2" '{}')"
 check "a pending student cannot submit its quiz" 403 \
   "$(status POST "/api/quizzes/$SMOKE_QUIZ_ID/submit" "$T_S2" '{"answers":[1]}')"
+# Refusing the submission is not enough on its own: a pending student who could
+# still read the paper would have the questions in hand before the approval that
+# lets them answer, which is most of the point of having a quiz.
+check "nor even read its questions" 0 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID?populate=Question" "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "nor reach them through the course" 0 \
+  "$(get "/api/courses/$SMOKE_COURSE_ID?populate[lessons][populate][quiz][populate][0]=Question" \
+    "$T_S2" | grep -o '"questionText"' | wc -l)"
+# The sharpest version of the same vector, and the one that would make the whole
+# approval step pointless: anyone may request enrolment in any course, and the
+# request is a row they own — so a pending enrolment must not become a way to read
+# the course through its own `course` relation.
+check "nor through the pending request itself" 0 \
+  "$(get "/api/enrollments?populate[course][populate][lessons][populate][quiz][populate][0]=Question" \
+    "$T_S2" | grep -o '"questionText"' | wc -l)"
+# The shape is not withheld, and this is the row the course page renders for a
+# student still waiting: the lesson is there, titled, with its quiz flagged.
+check "but the lesson itself is still listed" 1 \
+  "$(get "/api/courses/$SMOKE_COURSE_ID?populate[lessons]=true" "$T_S2" \
+    | grep -o '"sequenceOrder"' | wc -l)"
 # The bypass, and the assertion that matters most in this section: `/complete` is
 # not the only way to write a completed row, so gating it alone would leave the
 # whole approval step one POST away from irrelevant.
@@ -659,6 +753,18 @@ check "the course's own instructor can" 200 \
   "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/approve" "$T_I2" '{}')"
 check "and the stored status says so" approved \
   "$(get "/api/enrollments/$SMOKE_ENROL_ID" "$T_S2" | grep -oP '"current_status":"\K[^"]+')"
+# The same three requests as above, same account, same course — the only thing that
+# changed is the instructor's decision. This is the one place the rule is proven end
+# to end, and it is also the guard against over-redaction: a gate that never opens
+# would pass every check in the section above.
+check "and now the questions are readable" 1 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID?populate=Question" "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "through the course as well" 1 \
+  "$(get "/api/courses/$SMOKE_COURSE_ID?populate[lessons][populate][quiz][populate][0]=Question" \
+    "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "and through the enrolment that granted it" 1 \
+  "$(get "/api/enrollments?populate[course][populate][lessons][populate][quiz][populate][0]=Question" \
+    "$T_S2" | grep -o '"questionText"' | wc -l)"
 
 echo
 echo "=== a lesson with a quiz is not done until the quiz is passed ==="
@@ -757,7 +863,8 @@ check "the smoke lesson is cleaned up" 204 \
   "$(status DELETE "/api/lessons/$SMOKE_LESSON_ID" "$T_I2")"
 check "the smoke course is cleaned up" 204 \
   "$(status DELETE "/api/courses/$SMOKE_COURSE_ID" "$T_I2")"
-check "leaving the catalog as it was" 1 "$(rows '/api/courses?pagination[pageSize]=100' "$T_S1")"
+check "leaving the catalog as it was" "$CATALOG_BEFORE" \
+  "$(rows '/api/courses?pagination[pageSize]=100' "$T_S1")"
 check "and student2 owning nothing again" 0 \
   "$(rows '/api/lesson-progresses?pagination[pageSize]=100' "$T_S2")"
 

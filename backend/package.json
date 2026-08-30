@@ -10,6 +10,7 @@
     "dev": "strapi develop",
     "develop": "strapi develop",
     "seed": "node scripts/seed.js",
+    "seed:courses": "node scripts/seed-courses.js",
     "permissions": "node scripts/permissions.js",
     "backfill:enrollments": "node scripts/backfill-enrollment-status.js",
     "start": "strapi start",

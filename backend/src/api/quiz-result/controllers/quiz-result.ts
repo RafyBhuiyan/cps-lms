@@ -10,6 +10,7 @@ import {
   manageableCourseIds,
   quizzesOfCourses,
   scopeQueryToDocuments,
+  withholdCourseContent,
 } from '../../../utils/lms';
 
 /**
@@ -35,6 +36,12 @@ const scopeForUser = async (user: any): Promise<Record<string, any> | null> => {
 };
 
 export default factories.createCoreController('api::quiz-result.quiz-result', () => ({
+  /**
+   * Scoped to the caller's own rows, then stripped of any questions those rows
+   * reach. A result carries a `quiz` relation, so `?populate[quiz][populate][0]=Question`
+   * would otherwise hand back the paper of every quiz the caller has ever sat —
+   * including one they sat on an enrolment since rejected.
+   */
   async find(ctx: Context) {
     const { user } = ctx.state;
 
@@ -48,7 +55,9 @@ export default factories.createCoreController('api::quiz-result.quiz-result', ()
       await scopeQueryToDocuments(ctx, 'api::quiz-result.quiz-result', scope);
     }
 
-    return super.find(ctx);
+    const response = await super.find(ctx);
+    await withholdCourseContent(user, response);
+    return response;
   },
 
   async findOne(ctx: Context) {
@@ -98,6 +107,8 @@ export default factories.createCoreController('api::quiz-result.quiz-result', ()
       }
     }
 
-    return super.findOne(ctx);
+    const response = await super.findOne(ctx);
+    await withholdCourseContent(user, response);
+    return response;
   },
 }));

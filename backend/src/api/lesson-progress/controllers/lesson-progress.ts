@@ -13,6 +13,7 @@ import {
   manageableCourseIds,
   scopeQueryToDocuments,
   upsertOne,
+  withholdCourseContent,
 } from '../../../utils/lms';
 
 /**
@@ -35,6 +36,12 @@ const scopeForUser = async (user: any): Promise<Record<string, any> | null> => {
 export default factories.createCoreController(
   'api::lesson-progress.lesson-progress',
   () => ({
+    /**
+     * Scoped to the caller's own rows, then stripped of lesson bodies the caller
+     * is no longer entitled to. A progress row reaches its lesson, so a student
+     * whose enrolment was later rejected would otherwise keep reading the material
+     * through `?populate[lesson]=true`.
+     */
     async find(ctx: Context) {
       const { user } = ctx.state;
 
@@ -52,7 +59,9 @@ export default factories.createCoreController(
         );
       }
 
-      return super.find(ctx);
+      const response = await super.find(ctx);
+      await withholdCourseContent(user, response);
+      return response;
     },
 
     async findOne(ctx: Context) {
@@ -87,7 +96,9 @@ export default factories.createCoreController(
         }
       }
 
-      return super.findOne(ctx);
+      const response = await super.findOne(ctx);
+      await withholdCourseContent(user, response);
+      return response;
     },
 
     /**

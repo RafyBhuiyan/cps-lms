@@ -134,6 +134,11 @@ export default function CoursePage() {
 
   const practiceQuizzes = course.practice_quizzes ?? [];
 
+  // Who may open a quiz page at all: an enrolled student, to take it, or staff, to
+  // preview their own material. For anyone else the page would be empty, because
+  // the API withholds the questions.
+  const canOpenQuizzes = enrolled || canAuthorContent(user);
+
   return (
     <Page
       title={course.title}
@@ -275,14 +280,24 @@ export default function CoursePage() {
                     {/* A quiz has no title of its own; which course relation is set
                         is what makes it the final quiz. */}
                     <p className="font-medium">Final quiz</p>
-                    <p className={muted}>Graded and recorded. The latest score counts.</p>
+                    <p className={muted}>
+                      Graded and recorded. The latest score counts.
+                      {canOpenQuizzes ? '' : ' Enrol to take it.'}
+                    </p>
                   </div>
-                  <Link
-                    href={`/quizzes/${course.final_quiz.documentId}`}
-                    className={btnPrimary}
-                  >
-                    {enrolled ? 'Take quiz' : 'View'}
-                  </Link>
+                  {/* No link without an enrolment. The questions are the quiz, and
+                      they are meant to be seen while taking it — the API withholds
+                      them either way, so a button here would only open a page with
+                      nothing on it. The row itself stays: what a course contains is
+                      part of deciding whether to enrol. */}
+                  {canOpenQuizzes ? (
+                    <Link
+                      href={`/quizzes/${course.final_quiz.documentId}`}
+                      className={btnPrimary}
+                    >
+                      {enrolled ? 'Take quiz' : 'Preview'}
+                    </Link>
+                  ) : null}
                 </li>
               ) : null}
 
@@ -295,11 +310,16 @@ export default function CoursePage() {
                     <p className="font-medium">
                       Practice quiz{practiceQuizzes.length > 1 ? ` ${index + 1}` : ''}
                     </p>
-                    <p className={muted}>Scored for feedback; nothing is recorded.</p>
+                    <p className={muted}>
+                      Scored for feedback; nothing is recorded.
+                      {canOpenQuizzes ? '' : ' Enrol to take it.'}
+                    </p>
                   </div>
-                  <Link href={`/quizzes/${quiz.documentId}`} className={btnSecondary}>
-                    {enrolled ? 'Practise' : 'View'}
-                  </Link>
+                  {canOpenQuizzes ? (
+                    <Link href={`/quizzes/${quiz.documentId}`} className={btnSecondary}>
+                      {enrolled ? 'Practise' : 'Preview'}
+                    </Link>
+                  ) : null}
                 </li>
               ))}
             </ul>
