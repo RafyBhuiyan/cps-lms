@@ -1,4 +1,4 @@
-'use client';
+ 'use client';
 
 /**
  * Authoring one course: its own fields, and its lessons.
@@ -25,7 +25,7 @@
  */
 
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { RequireRole } from '@/components/RequireRole';
 import {
@@ -87,6 +87,7 @@ const quizLabel = (quiz: Quiz): string => {
 
 function CourseEdit() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const courseId = params.id;
   const { token, user } = useAuth();
 
@@ -153,6 +154,21 @@ function CourseEdit() {
       setCourseError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSavingCourse(false);
+    }
+  };
+
+  const removeCourse = async () => {
+    if (!token) return;
+
+    if (!window.confirm(`Delete “${data?.course.title ?? 'this course'}”? This removes the course and all of its lessons.`)) {
+      return;
+    }
+
+    try {
+      await api.deleteCourse(courseId, token);
+      router.push(isAdmin(user) ? '/dashboard/admin' : '/dashboard/instructor');
+    } catch (cause: unknown) {
+      setCourseError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -506,6 +522,9 @@ function CourseEdit() {
                   Discard changes
                 </button>
               ) : null}
+              <button type="button" onClick={() => void removeCourse()} className={btnSecondary}>
+                Delete course
+              </button>
             </div>
           </form>
         </Panel>

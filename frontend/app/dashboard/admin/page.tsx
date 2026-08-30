@@ -25,6 +25,7 @@ import {
 import * as api from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { isAdmin } from '@/lib/roles';
+import type { Course } from '@/lib/types';
 import { useAsync } from '@/lib/useAsync';
 
 export default function AdminDashboardPage() {
@@ -54,6 +55,21 @@ function AdminDashboard() {
   }, [token]);
 
   const { data, error, loading, reload } = useAsync(load);
+
+  const removeCourse = async (course: Course) => {
+    if (!token) return;
+
+    if (!window.confirm(`Delete “${course.title}”? This removes the course and its lessons.`)) {
+      return;
+    }
+
+    try {
+      await api.deleteCourse(course.documentId, token);
+      reload();
+    } catch (cause: unknown) {
+      window.alert(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
 
   return (
     <Page
@@ -126,6 +142,13 @@ function AdminDashboard() {
                       >
                         Edit
                       </Link>
+                      <button
+                        type="button"
+                        onClick={() => void removeCourse(course)}
+                        className={btnSecondary}
+                      >
+                        Delete
+                      </button>
                       <Link
                         href={`/dashboard/instructor/courses/${course.documentId}`}
                         className={btnSecondary}

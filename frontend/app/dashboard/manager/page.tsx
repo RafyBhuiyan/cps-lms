@@ -53,9 +53,20 @@ function ManagerDashboard() {
   const [formError, setFormError] = useState<string | null>(null);
   const [publishing, setPublishing] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [courseTitle, setCourseTitle] = useState('');
+  const [courseDescription, setCourseDescription] = useState('');
+  const [courseBusy, setCourseBusy] = useState(false);
+  const [courseError, setCourseError] = useState<string | null>(null);
 
-  const load = useMemo(() => (token ? () => api.listBlogs(token) : null), [token]);
-  const { data: posts, error, loading, reload } = useAsync(load);
+  const blogLoad = useMemo(() => (token ? () => api.listBlogs(token) : null), [token]);
+  const { data: posts, error, loading, reload } = useAsync(blogLoad);
+  const courseLoad = useMemo(() => (token ? () => api.listCourses(token) : null), [token]);
+  const {
+    data: courses,
+    error: coursesError,
+    loading: coursesLoading,
+    reload: reloadCourses,
+  } = useAsync(courseLoad);
 
   const submit = async (currentStatus: 'draft' | 'published') => {
     if (!token) return;
@@ -94,13 +105,51 @@ function ManagerDashboard() {
     }
   };
 
+  const createCourse = async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (!token) return;
+
+    setCourseBusy(true);
+    setCourseError(null);
+
+    try {
+      await api.createCourse(
+        { title: courseTitle.trim(), description: courseDescription.trim() },
+        token
+      );
+      setCourseTitle('');
+      setCourseDescription('');
+      reloadCourses();
+    } catch (cause: unknown) {
+      setCourseError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCourseBusy(false);
+    }
+  };
+
+  const removeCourse = async (documentId: string, title: string) => {
+    if (!token) return;
+
+    if (!window.confirm(`Delete “${title}”? This removes the course and its lessons.`)) {
+      return;
+    }
+
+    try {
+      await api.deleteCourse(documentId, token);
+      reloadCourses();
+    } catch (cause: unknown) {
+      setCourseError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   const drafts = (posts ?? []).filter((post) => post.currentStatus === 'draft');
   const live = (posts ?? []).filter((post) => post.currentStatus === 'published');
 
   return (
     <Page
-      title="Posts"
-      intro="Drafts are visible only to you and to admins until you publish them."
+      title="Content"
+      intro="Manage course content and publish blog updates."
       actions={
         <Link href="/blog" className={btnSecondary}>
           View the blog
@@ -108,6 +157,86 @@ function ManagerDashboard() {
       }
     >
       <div className="space-y-6">
+        <Panel title="New course">
+          <form onSubmit={createCourse} className="max-w-xl space-y-4">
+            <div>
+              <label className={label} htmlFor="content-course-title">
+                Course title
+              </label>
+              <input
+                id="content-course-title"
+                className={input}
+                value={courseTitle}
+                onChange={(event) => setCourseTitle(event.target.value)}
+                required
+              />
+            </div>
+
+            <div>
+              <label className={label} htmlFor="content-course-description">
+                Description
+              </label>
+              <textarea
+                id="content-course-description"
+                className={`${input} min-h-24`}
+                value={courseDescription}
+                onChange={(event) => setCourseDescription(event.target.value)}
+              />
+            </div>
+
+            {courseError ? <ErrorNote message={courseError} /> : null}
+
+            <button type="submit" disabled={courseBusy} className={btnPrimary}>
+              {courseBusy ? 'Creating…' : 'Create course'}
+            </button>
+          </form>
+        </Panel>
+
+        <Panel title={`Courses${courses ? ` (${courses.length})` : ''}`}>
+          {coursesLoading && !courses ? <Loading /> : null}
+          {coursesError ? <ErrorNote message={coursesError} onRetry={reloadCourses} /> : null}
+
+          {courses ? (
+            courses.length === 0 ? (
+              <Empty>No courses yet.</Empty>
+            ) : (
+              <ul className="space-y-3">
+                {courses.map((course) => (
+                  <li
+                    key={course.documentId}
+                    className={`${card} flex flex-wrap items-center justify-between gap-3`}
+                  >
+                    <div className="flex-1">
+                      <p className="font-semibold">{course.title}</p>
+                      {course.description ? (
+                        <p className={`mt-1 line-clamp-2 ${muted}`}>{course.description}</p>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Link href={`/courses/${course.documentId}`} className={btnSecondary}>
+                        View
+                      </Link>
+                      <Link
+                        href={`/dashboard/instructor/courses/${course.documentId}/edit`}
+                        className={btnSecondary}
+                      >
+                        Edit
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => void removeCourse(course.documentId, course.title)}
+                        className={btnSecondary}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : null}
+        </Panel>
+
         <Panel title="New post">
           <form
             onSubmit={(event) => {
