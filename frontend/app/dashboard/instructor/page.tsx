@@ -34,6 +34,7 @@ import {
 import * as api from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { isAdmin, isInstructor } from '@/lib/roles';
+import type { Course } from '@/lib/types';
 import { useAsync } from '@/lib/useAsync';
 
 export default function InstructorDashboardPage() {
@@ -79,6 +80,21 @@ function InstructorDashboard() {
     }
   };
 
+  const removeCourse = async (course: Course) => {
+    if (!token) return;
+
+    if (!window.confirm(`Delete “${course.title}”? This removes the course and its lessons.`)) {
+      return;
+    }
+
+    try {
+      await api.deleteCourse(course.documentId, token);
+      reload();
+    } catch (cause: unknown) {
+      setCreateError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   return (
     <Page
       title="Teaching"
@@ -118,6 +134,13 @@ function InstructorDashboard() {
                       >
                         Edit
                       </Link>
+                      <button
+                        type="button"
+                        onClick={() => void removeCourse(course)}
+                        className={btnSecondary}
+                      >
+                        Delete
+                      </button>
                       <Link
                         href={`/dashboard/instructor/courses/${course.documentId}`}
                         className={btnPrimary}

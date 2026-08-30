@@ -121,6 +121,9 @@ export const updateCourse = (
     body: { data },
   }).then((r) => r.data);
 
+export const deleteCourse = (documentId: string, token: string) =>
+  request<void>(`/api/courses/${documentId}`, { token, method: 'DELETE' });
+
 /* -------------------------------------------------------------------------- */
 /* Progress                                                                  */
 /* -------------------------------------------------------------------------- */
