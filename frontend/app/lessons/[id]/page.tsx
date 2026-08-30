@@ -1,12 +1,17 @@
 'use client';
 
 /**
- * One lesson: its content, and for an enrolled student the completion toggle.
+ * One lesson: its content, its quiz if it has one, and for an enrolled student the
+ * completion toggle.
  *
  * Sign-in is required — `lesson.findOne` is not granted to the public role, so
  * this page has nothing to show an anonymous visitor. Any signed-in role may read
  * a lesson (instructors and editors need to preview them); only students can mark
  * one complete, and only in a course they are enrolled in, both enforced by the API.
+ *
+ * A lesson whose quiz has not been passed cannot be completed and does not release
+ * its Next link. The UI only mirrors that — the API refuses the write either way,
+ * on both `/lessons/:id/complete` and `POST /api/lesson-progresses`.
  */
 
 import Link from 'next/link';
@@ -29,6 +34,7 @@ import * as api from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { isStudent } from '@/lib/roles';
 import { useAsync } from '@/lib/useAsync';
+import { isEnrollmentActive } from '@/lib/types';
 
 export default function LessonPage() {
   // Any account will do here; the predicate is what "signed in is enough" looks
@@ -61,8 +67,8 @@ function LessonView() {
       }
 
       const enrollments = await api.listEnrollments(token);
-      const enrolled = enrollments.some(
-        (enrollment) => enrollment.course?.documentId === courseId
+      const enrolled = isEnrollmentActive(
+        enrollments.find((row) => row.course?.documentId === courseId)
       );
 
       return {
@@ -70,7 +76,8 @@ function LessonView() {
         courseId,
         enrolled,
         // Own progress is readable whether or not enrolled, and it carries the
-        // sibling lessons this page uses for its previous/next links.
+        // sibling lessons this page uses for its previous/next links as well as
+        // the quiz state for each.
         progress: await api.getCourseProgress(courseId, token),
       };
     };
@@ -124,7 +131,21 @@ function LessonView() {
   const index = siblings.findIndex((l) => l.documentId === lessonId);
   const previous = index > 0 ? siblings[index - 1] : null;
   const next = index >= 0 && index < siblings.length - 1 ? siblings[index + 1] : null;
-  const completed = index >= 0 ? siblings[index].completed : false;
+  const current = index >= 0 ? siblings[index] : null;
+  const completed = current?.completed ?? false;
+
+  // The quiz to show, and whether it locks this lesson.
+  //
+  // `progress` is the authority: it knows whether the quiz has questions and what
+  // the student scored. The populated relation is only a fallback for a viewer with
+  // no progress payload — an instructor previewing the lesson — who is not gated
+  // anyway.
+  const quizId = current?.quizId ?? lesson.quiz?.documentId ?? null;
+  const quizRequired = current?.quizRequired ?? false;
+  const quizPassed = current?.quizPassed ?? true;
+  const quizScore = current?.quizScore ?? null;
+  const passMark = progress?.quizPassMark ?? null;
+  const locked = quizRequired && !quizPassed;
 
   return (
     <Page
@@ -169,6 +190,37 @@ function LessonView() {
           <Blocks content={lesson.content} />
         </Panel>
 
+        {quizId ? (
+          <Panel
+            title="Lesson quiz"
+            action={
+              quizRequired ? (
+                <Badge tone={quizPassed ? 'good' : 'warn'}>
+                  {quizPassed ? 'Passed' : 'Not passed yet'}
+                </Badge>
+              ) : null
+            }
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className={muted}>
+                {!quizRequired
+                  ? 'This quiz has no questions yet, so it does not affect the lesson.'
+                  : quizPassed
+                    ? `You scored ${quizScore}%. This lesson is unlocked — retaking the quiz cannot undo that.`
+                    : quizScore === null
+                      ? `Pass this quiz${passMark === null ? '' : ` with ${passMark}% or more`} to complete the lesson and move on.`
+                      : `You scored ${quizScore}%${passMark === null ? '' : `, and ${passMark}% is needed`}. Take it again to unlock the lesson.`}
+              </p>
+              <Link
+                href={`/quizzes/${quizId}`}
+                className={locked ? btnPrimary : btnSecondary}
+              >
+                {quizScore === null ? 'Take the quiz' : 'Take it again'}
+              </Link>
+            </div>
+          </Panel>
+        ) : null}
+
         {isStudent(user) ? (
           <Panel>
             {enrolled ? (
@@ -182,7 +234,10 @@ function LessonView() {
                   <button
                     type="button"
                     onClick={toggle}
-                    disabled={saving}
+                    // Un-completing stays available whatever the quiz says: it is
+                    // the only route back from done, and the API allows it for the
+                    // same reason.
+                    disabled={saving || (locked && !completed)}
                     className={completed ? btnSecondary : btnPrimary}
                   >
                     {saving
@@ -192,15 +247,17 @@ function LessonView() {
                         : 'Mark this lesson complete'}
                   </button>
                   <span className={muted}>
-                    The server recounts your progress on every change.
+                    {locked && !completed
+                      ? 'Pass the lesson quiz first.'
+                      : 'The server recounts your progress on every change.'}
                   </span>
                 </div>
               </>
             ) : (
               <p className={muted}>
-                You are not enrolled in this course, so completion is not tracked.{' '}
+                Completion is not tracked until your enrolment is approved.{' '}
                 <Link href={`/courses/${courseId}`} className="underline">
-                  Enrol from the course page
+                  Check its status on the course page
                 </Link>
                 .
               </p>
@@ -218,9 +275,21 @@ function LessonView() {
               <span />
             )}
             {next ? (
-              <Link href={`/lessons/${next.documentId}`} className={btnSecondary}>
-                {next.title} →
-              </Link>
+              // Locked only by *this* lesson's quiz, so lessons without one navigate
+              // exactly as they did before.
+              locked ? (
+                <span
+                  className={`${btnSecondary} cursor-not-allowed opacity-50`}
+                  aria-disabled="true"
+                  title="Pass this lesson's quiz to continue."
+                >
+                  {next.title} →
+                </span>
+              ) : (
+                <Link href={`/lessons/${next.documentId}`} className={btnSecondary}>
+                  {next.title} →
+                </Link>
+              )
             ) : null}
           </nav>
         ) : null}

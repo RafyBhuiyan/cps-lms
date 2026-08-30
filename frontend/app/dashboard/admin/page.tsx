@@ -119,12 +119,20 @@ function AdminDashboard() {
                     >
                       {course.title}
                     </Link>
-                    <Link
-                      href={`/dashboard/instructor/courses/${course.documentId}`}
-                      className={btnSecondary}
-                    >
-                      Students
-                    </Link>
+                    <div className="flex gap-2">
+                      <Link
+                        href={`/dashboard/instructor/courses/${course.documentId}/edit`}
+                        className={btnSecondary}
+                      >
+                        Edit
+                      </Link>
+                      <Link
+                        href={`/dashboard/instructor/courses/${course.documentId}`}
+                        className={btnSecondary}
+                      >
+                        Students
+                      </Link>
+                    </div>
                   </li>
                 ))}
               </ul>

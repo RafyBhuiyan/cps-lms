@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * One course: its lessons, its quizzes, and — for an enrolled student — progress.
+ * One course: its lessons, its quizzes, and — for an approved student — progress.
  *
  * Three things worth knowing about the data here:
  *
@@ -11,7 +11,9 @@
  *     than showing an empty syllabus.
  *   * Enrolment is discovered by listing the caller's own enrollments — the API
  *     scopes that list server-side, so it cannot be used to see anyone else's.
- *   * Progress is only fetched once enrolled; before that the endpoint would
+ *     The whole row is kept rather than a boolean, because a request that is
+ *     pending or declined is not the same as no request at all.
+ *   * Progress is only fetched once approved; before that the endpoint would
  *     honestly report 0%, which reads like a bug rather than an invitation.
  */
 
@@ -35,7 +37,7 @@ import * as api from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { canAuthorContent, isStudent } from '@/lib/roles';
 import { useAsync } from '@/lib/useAsync';
-import type { ProgressLesson } from '@/lib/types';
+import { isEnrollmentActive, type Enrollment, type ProgressLesson } from '@/lib/types';
 
 export default function CoursePage() {
   const params = useParams<{ id: string }>();
@@ -53,18 +55,19 @@ export default function CoursePage() {
       const course = await api.getCourse(courseId, token);
 
       if (!token || !isStudent(user)) {
-        return { course, enrolled: false, progress: null };
+        return { course, enrollment: null as Enrollment | null, progress: null };
       }
 
       const enrollments = await api.listEnrollments(token);
-      const enrolled = enrollments.some(
-        (enrollment) => enrollment.course?.documentId === courseId
-      );
+      const enrollment =
+        enrollments.find((row) => row.course?.documentId === courseId) ?? null;
 
       return {
         course,
-        enrolled,
-        progress: enrolled ? await api.getCourseProgress(courseId, token) : null,
+        enrollment,
+        progress: isEnrollmentActive(enrollment)
+          ? await api.getCourseProgress(courseId, token)
+          : null,
       };
     };
   }, [courseId, token, user, status]);
@@ -81,8 +84,8 @@ export default function CoursePage() {
       await api.enroll(courseId, token);
       reload();
     } catch (cause: unknown) {
-      // 409 means already enrolled, which is not really an error — reloading
-      // shows the enrolled view.
+      // 409 covers three states — already approved, already waiting, previously
+      // declined — and the API says which, so the message is worth showing.
       setEnrollError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setEnrolling(false);
@@ -105,7 +108,9 @@ export default function CoursePage() {
     );
   }
 
-  const { course, enrolled, progress } = data;
+  const { course, enrollment, progress } = data;
+  const enrolled = isEnrollmentActive(enrollment);
+  const requestState = enrollment?.current_status ?? null;
 
   // The progress payload already carries the lesson list, sorted and flagged, so
   // it is preferred; the populated relation is the fallback for everyone else.
@@ -118,6 +123,13 @@ export default function CoursePage() {
         title: lesson.title,
         sequenceOrder: lesson.sequenceOrder,
         completed: false,
+        quizId: lesson.quiz?.documentId ?? null,
+        // Whether that quiz has questions is not populated here, and only the
+        // progress payload knows whether it was passed. Both are shown for an
+        // approved student, which is the only case the fallback does not cover.
+        quizRequired: Boolean(lesson.quiz),
+        quizScore: null,
+        quizPassed: false,
       }));
 
   const practiceQuizzes = course.practice_quizzes ?? [];
@@ -147,7 +159,17 @@ export default function CoursePage() {
         ) : null}
 
         {isStudent(user) ? (
-          <Panel title={enrolled ? 'Your progress' : 'Enrol'}>
+          <Panel
+            title={
+              enrolled
+                ? 'Your progress'
+                : requestState === 'pending'
+                  ? 'Awaiting approval'
+                  : requestState === 'rejected'
+                    ? 'Request declined'
+                    : 'Enrol'
+            }
+          >
             {enrolled && progress ? (
               <>
                 <ProgressBar
@@ -166,10 +188,22 @@ export default function CoursePage() {
                   </p>
                 ) : null}
               </>
+            ) : requestState === 'pending' ? (
+              <p className={muted}>
+                Your request is with the course instructor. Once it is approved your
+                progress will be tracked here and you will be able to take this
+                course&apos;s quizzes.
+              </p>
+            ) : requestState === 'rejected' ? (
+              <p className={muted}>
+                The instructor declined your enrolment request. Contact them if you
+                think that was a mistake — only they can reopen it.
+              </p>
             ) : (
               <>
                 <p className={muted}>
-                  Enrol to track lesson completion and to take this course&apos;s quizzes.
+                  Request enrolment to track lesson completion and to take this
+                  course&apos;s quizzes. An instructor approves it before you start.
                 </p>
                 {enrollError ? (
                   <div className="mt-3">
@@ -182,7 +216,7 @@ export default function CoursePage() {
                   disabled={enrolling}
                   className={`${btnPrimary} mt-3`}
                 >
-                  {enrolling ? 'Enrolling…' : 'Enrol in this course'}
+                  {enrolling ? 'Requesting…' : 'Request enrolment'}
                 </button>
               </>
             )}
@@ -210,7 +244,18 @@ export default function CoursePage() {
                     </span>
                     {lesson.title}
                   </Link>
-                  {lesson.completed ? <Badge tone="good">Completed</Badge> : null}
+                  <div className="flex shrink-0 items-center gap-2">
+                    {lesson.quizRequired ? (
+                      progress ? (
+                        <Badge tone={lesson.quizPassed ? 'good' : 'warn'}>
+                          {lesson.quizPassed ? 'Quiz passed' : 'Quiz to pass'}
+                        </Badge>
+                      ) : (
+                        <Badge>Has a quiz</Badge>
+                      )
+                    ) : null}
+                    {lesson.completed ? <Badge tone="good">Completed</Badge> : null}
+                  </div>
                 </li>
               ))}
             </ol>

@@ -15,6 +15,7 @@ import type {
   Course,
   CourseProgress,
   Enrollment,
+  EnrollmentDecision,
   Lesson,
   LessonCompletion,
   LessonProgress,
@@ -84,10 +85,13 @@ export const listMyCourses = (token: string) =>
  * Populating these needs `find` on lesson and quiz, which anonymous visitors do
  * not have — for them the relations are silently dropped rather than erroring, so
  * the page still renders and simply invites them to sign in.
+ *
+ * Each lesson's own `quiz` comes along too: the lesson editor needs to know what
+ * is already attached, and the course page uses it to mark which lessons are gated.
  */
 export const getCourse = (documentId: string, token?: string | null) =>
   request<StrapiSingle<Course>>(
-    `/api/courses/${documentId}?populate[lessons]=true&populate[final_quiz]=true&populate[practice_quizzes]=true`,
+    `/api/courses/${documentId}?populate[lessons][populate][0]=quiz&populate[final_quiz]=true&populate[practice_quizzes]=true`,
     { token }
   ).then((r) => r.data);
 
@@ -96,6 +100,24 @@ export const createCourse = (data: { title: string; description: string }, token
     token,
     method: 'POST',
     // `creator` is assigned from the token server-side; sending one is pointless.
+    body: { data },
+  }).then((r) => r.data);
+
+/**
+ * Edit a course. Gated by `can-manage-course`, so only its instructor, a content
+ * manager or an admin gets a 200.
+ *
+ * `slug` is deliberately absent: it is the course's URL, and the API only ever
+ * fills it on create.
+ */
+export const updateCourse = (
+  documentId: string,
+  data: { title?: string; description?: string | null; coverUrl?: string | null },
+  token: string
+) =>
+  request<StrapiSingle<Course>>(`/api/courses/${documentId}`, {
+    token,
+    method: 'PUT',
     body: { data },
   }).then((r) => r.data);
 
@@ -139,21 +161,70 @@ export const uncompleteLesson = (lessonId: string, token: string) =>
 /* -------------------------------------------------------------------------- */
 
 export const getLesson = (documentId: string, token: string) =>
-  request<StrapiSingle<Lesson>>(`/api/lessons/${documentId}?populate[course]=true`, {
+  request<StrapiSingle<Lesson>>(
+    `/api/lessons/${documentId}?populate[course]=true&populate[quiz]=true`,
+    { token }
+  ).then((r) => r.data);
+
+/**
+ * What a lesson editor may write. `course` and `quiz` are documentIds; `quiz: null`
+ * detaches whatever was attached.
+ *
+ * Both relations are checked server-side — `can-manage-lesson` refuses a lesson
+ * pointed at a course the caller does not manage, whether creating one or moving
+ * an existing one.
+ */
+export type LessonDraft = {
+  title?: string;
+  content?: unknown;
+  videoUrl?: string | null;
+  sequenceOrder?: number | null;
+  course?: string;
+  quiz?: string | null;
+};
+
+export const createLesson = (data: LessonDraft, token: string) =>
+  request<StrapiSingle<Lesson>>('/api/lessons', {
     token,
+    method: 'POST',
+    body: { data },
   }).then((r) => r.data);
+
+export const updateLesson = (documentId: string, data: LessonDraft, token: string) =>
+  request<StrapiSingle<Lesson>>(`/api/lessons/${documentId}`, {
+    token,
+    method: 'PUT',
+    body: { data },
+  }).then((r) => r.data);
+
+/** Answers 204 with no body, so there is nothing to unwrap. */
+export const deleteLesson = (documentId: string, token: string) =>
+  request<void>(`/api/lessons/${documentId}`, { token, method: 'DELETE' });
+
+/**
+ * Every quiz, with what it is currently attached to.
+ *
+ * The three relations are the only way to tell the kinds apart, and the lesson
+ * editor shows them so an author can see that picking a quiz would take it off
+ * another lesson — a quiz belongs to at most one.
+ */
+export const listQuizzes = (token: string) =>
+  request<StrapiList<Quiz>>(
+    `/api/quizzes?populate[Question]=true&populate[course]=true&populate[parent_course]=true&populate[lesson]=true&${ALL}`,
+    { token }
+  ).then((r) => r.data);
 
 /**
  * The questions and options, never the answer key: `correctOptionIndex` is
  * `private` in the schema, so it is stripped from every REST response. Grading
  * happens in `submitQuiz`.
  *
- * `course` / `parent_course` are populated because they are the only way to tell a
- * final quiz from a practice one.
+ * The relations are populated because they are the only way to tell a final quiz
+ * from a practice one from a lesson quiz.
  */
 export const getQuiz = (documentId: string, token: string) =>
   request<StrapiSingle<Quiz>>(
-    `/api/quizzes/${documentId}?populate[Question]=true&populate[course]=true&populate[parent_course]=true`,
+    `/api/quizzes/${documentId}?populate[Question]=true&populate[course]=true&populate[parent_course]=true&populate[lesson][populate][0]=course`,
     { token }
   ).then((r) => r.data);
 
@@ -179,9 +250,37 @@ export const enroll = (courseId: string, token: string) =>
   request<StrapiSingle<Enrollment>>('/api/enrollments', {
     token,
     method: 'POST',
-    // `user` comes from the token; enrolling twice answers 409.
+    // `user` comes from the token, and the row is created `pending` whatever the
+    // payload says. Requesting twice answers 409.
     body: { data: { course: courseId } },
   }).then((r) => r.data);
+
+/**
+ * Deciding on a request. All three are restricted server-side to people who manage
+ * the course, so an instructor cannot approve into someone else's class.
+ *
+ * `reopen` is the only way back from a rejection: a declined student's own retry
+ * answers 409 rather than creating a second request.
+ */
+const decideEnrollment = (
+  documentId: string,
+  action: 'approve' | 'reject' | 'reopen',
+  token: string
+) =>
+  request<StrapiSingle<EnrollmentDecision>>(`/api/enrollments/${documentId}/${action}`, {
+    token,
+    method: 'POST',
+    body: {},
+  }).then((r) => r.data);
+
+export const approveEnrollment = (documentId: string, token: string) =>
+  decideEnrollment(documentId, 'approve', token);
+
+export const rejectEnrollment = (documentId: string, token: string) =>
+  decideEnrollment(documentId, 'reject', token);
+
+export const reopenEnrollment = (documentId: string, token: string) =>
+  decideEnrollment(documentId, 'reopen', token);
 
 /** Only final quizzes are ever recorded, so this is the student's grade book. */
 export const listQuizResults = (token: string) =>

@@ -33,22 +33,9 @@ import {
 } from '@/components/ui';
 import * as api from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { toBlocks } from '@/lib/blocks';
 import { isAdmin, isContentManager } from '@/lib/roles';
 import { useAsync } from '@/lib/useAsync';
-import type { BlockNode } from '@/lib/types';
-
-/** Plain text to the `blocks` shape: blank lines separate paragraphs. */
-const toBlocks = (text: string): BlockNode[] => {
-  const paragraphs = text
-    .split(/\n{2,}/)
-    .map((chunk) => chunk.trim())
-    .filter(Boolean);
-
-  return (paragraphs.length > 0 ? paragraphs : ['']).map((paragraph) => ({
-    type: 'paragraph',
-    children: [{ type: 'text', text: paragraph }],
-  }));
-};
 
 export default function ManagerDashboardPage() {
   return (

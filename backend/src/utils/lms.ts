@@ -47,6 +47,8 @@ export type ProgressLesson = {
   quizId: string | null;
   /** Whether that quiz gates completion — see `lessonQuizGate`. */
   quizRequired: boolean;
+  /** The student's latest mark on it, or null if never attempted. */
+  quizScore: number | null;
   /** True when no quiz gates the lesson, so `quizRequired && !quizPassed` is the lock. */
   quizPassed: boolean;
 };
@@ -55,6 +57,11 @@ export type CourseProgress = {
   completedLessons: number;
   totalLessons: number;
   progressPercent: number;
+  /**
+   * `QUIZ_PASS_SCORE`, echoed so a client can explain the lock without hardcoding
+   * the number in a second place.
+   */
+  quizPassMark: number;
   lessons: ProgressLesson[];
 };
 
@@ -363,7 +370,7 @@ export const canManageCourseById = async (
 };
 
 /**
- * Pulls a course documentId out of a relation field in a request body.
+ * Pulls a related document's documentId out of a relation field in a request body.
  *
  * Strapi 5 accepts several shapes for the same relation — a bare documentId,
  * `{ documentId }`, or the longhand `{ connect: [...] }` / `{ set: [...] }`. The
@@ -397,6 +404,25 @@ export const courseRefFromBody = (body: any, field: string): string | null => {
   }
 
   return null;
+};
+
+/**
+ * The documentId of the course a lesson belongs to, or null.
+ *
+ * A lesson has no owner of its own, so this is what the ownership policies stand
+ * on — both `can-manage-lesson`, and `can-manage-quiz` for a quiz that reaches its
+ * course only through the lesson it gates.
+ */
+export const courseIdOfLesson = async (
+  lessonDocumentId: string
+): Promise<string | null> => {
+  const lesson = await docs('api::lesson.lesson').findOne({
+    documentId: lessonDocumentId,
+    populate: ['course'],
+    ...ANY_VERSION,
+  });
+
+  return lesson?.course?.documentId ?? null;
 };
 
 /** documentIds of every course the given instructor may manage. */
@@ -445,7 +471,13 @@ export const computeCourseProgress = async (
   const totalLessons = lessons.length;
 
   if (totalLessons === 0) {
-    return { completedLessons: 0, totalLessons: 0, progressPercent: 0, lessons: [] };
+    return {
+      completedLessons: 0,
+      totalLessons: 0,
+      progressPercent: 0,
+      quizPassMark: QUIZ_PASS_SCORE,
+      lessons: [],
+    };
   }
 
   const completedRows = await docs('api::lesson-progress.lesson-progress').findMany({
@@ -473,13 +505,13 @@ export const computeCourseProgress = async (
 
   const completedLessons = completedLessonIds.size;
 
-  // Which lesson quizzes this student has passed, in one query rather than one per
-  // lesson. A lesson is gated only when its quiz actually carries questions.
+  // What this student scored on each gated lesson quiz, in one query rather than
+  // one per lesson. A lesson is gated only when its quiz actually carries questions.
   const gatedQuizIds = lessons
     .filter((lesson: any) => (lesson.quiz?.Question?.length ?? 0) > 0)
     .map((lesson: any) => lesson.quiz.documentId);
 
-  const passedQuizIds = new Set<string>();
+  const scoreByQuizId = new Map<string, number>();
 
   if (gatedQuizIds.length > 0) {
     const results = await docs('api::quiz-result.quiz-result').findMany({
@@ -493,8 +525,8 @@ export const computeCourseProgress = async (
       const score = toScore((result as any).latestScore);
       const quizId = (result as any).quiz?.documentId;
 
-      if (quizId && score !== null && score >= QUIZ_PASS_SCORE) {
-        passedQuizIds.add(quizId);
+      if (quizId && score !== null) {
+        scoreByQuizId.set(quizId, score);
       }
     }
   }
@@ -503,9 +535,11 @@ export const computeCourseProgress = async (
     completedLessons,
     totalLessons,
     progressPercent: Math.round((completedLessons / totalLessons) * 100),
+    quizPassMark: QUIZ_PASS_SCORE,
     lessons: lessons.map((lesson: any) => {
       const quizId = lesson.quiz?.documentId ?? null;
       const quizRequired = (lesson.quiz?.Question?.length ?? 0) > 0;
+      const quizScore = quizId ? (scoreByQuizId.get(quizId) ?? null) : null;
 
       return {
         documentId: lesson.documentId,
@@ -514,9 +548,12 @@ export const computeCourseProgress = async (
         completed: completedLessonIds.has(lesson.documentId),
         quizId,
         quizRequired,
+        quizScore,
         // Not required means nothing to pass, so `true` — a caller can read
         // `quizRequired && !quizPassed` as the lock and never special-case.
-        quizPassed: quizRequired ? passedQuizIds.has(quizId) : true,
+        quizPassed: quizRequired
+          ? quizScore !== null && quizScore >= QUIZ_PASS_SCORE
+          : true,
       };
     }),
   };

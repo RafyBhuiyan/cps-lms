@@ -8,10 +8,11 @@
  * through a relation to the user type, which Strapi rejects for any role that
  * cannot list users. Granting that would let every instructor enumerate accounts.
  *
- * Creating a course is the only write an instructor has here. Lessons and quizzes
- * are authored in the Strapi admin, which is deliberate: their content is
- * structured (blocks, question arrays with answer keys) and the editor there does a
- * better job than a form in this app would.
+ * Creating a course is the only write an instructor has here; everything else about
+ * it — its fields, its lessons, and which quiz gates which lesson — is edited on the
+ * course's own edit page. Quiz *questions* are still written in the Strapi admin,
+ * because the answer key must stay `private` and the repeatable-component editor
+ * there handles it better than a form in this app would.
  */
 
 import Link from 'next/link';
@@ -112,6 +113,12 @@ function InstructorDashboard() {
                         View
                       </Link>
                       <Link
+                        href={`/dashboard/instructor/courses/${course.documentId}/edit`}
+                        className={btnSecondary}
+                      >
+                        Edit
+                      </Link>
+                      <Link
                         href={`/dashboard/instructor/courses/${course.documentId}`}
                         className={btnPrimary}
                       >
@@ -159,7 +166,7 @@ function InstructorDashboard() {
                 {creating ? 'Creating…' : 'Create course'}
               </button>
               <span className={muted}>
-                Add its lessons and quizzes in the Strapi admin.
+                Then use Edit to write its lessons and attach their quizzes.
               </span>
             </div>
           </form>
