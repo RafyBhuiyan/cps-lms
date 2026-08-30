@@ -593,11 +593,32 @@ check "not to another instructor" 0 \
 check "and its creator may edit it" 200 \
   "$(status PUT "/api/courses/$SMOKE_COURSE_ID" "$T_I2" '{"data":{"description":"Edited."}}')"
 
-# student2 is enrolled nowhere, so its list is a clean before/after.
+# A lesson with a quiz on it, so the approval and gate assertions below have
+# something real to work on. This is also the authoring path the frontend editor
+# drives: create the lesson, then attach a quiz to it.
+#
+# `correctOptionIndex` is `private`, so it is stripped from every response — but it
+# is writable, and the only way to observe that it landed is to have the server
+# grade an answer against it, which is what the gate section does.
+SMOKE_LESSON=$(post '/api/lessons' "$T_I2" \
+  "{\"data\":{\"title\":\"Gated Lesson\",\"sequenceOrder\":1,\"course\":\"$SMOKE_COURSE_ID\"}}")
+SMOKE_LESSON_ID=$(printf '%s' "$SMOKE_LESSON" | grep -oP '"documentId":"\K[^"]+' | head -1)
+SMOKE_QUIZ=$(post '/api/quizzes' "$T_I2" \
+  "{\"data\":{\"lesson\":\"$SMOKE_LESSON_ID\",\"Question\":[{\"questionText\":\"2+2?\",\"options\":[\"3\",\"4\",\"5\"],\"correctOptionIndex\":1}]}}")
+SMOKE_QUIZ_ID=$(printf '%s' "$SMOKE_QUIZ" | grep -oP '"documentId":"\K[^"]+' | head -1)
+
+check "an instructor can add a lesson to their own course" ok "${SMOKE_LESSON_ID:+ok}"
+check "and attach a quiz to that lesson" ok "${SMOKE_QUIZ_ID:+ok}"
+# The seeded quiz is checked earlier; this is the same guarantee for one written
+# over REST, where the key was supplied by the client rather than by the seed.
+check "the answer key does not come back out" 0 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID?populate=Question" "$T_I2" | grep -c correctOptionIndex || true)"
+
+# student2 has no enrollment anywhere, so its list is a clean before/after.
 S2_BEFORE=$(rows '/api/enrollments?pagination[pageSize]=100' "$T_S2")
-check "a student can enrol themselves" 201 \
+check "a student can request enrolment" 201 \
   "$(status POST '/api/enrollments' "$T_S2" "{\"data\":{\"course\":\"$SMOKE_COURSE_ID\"}}")"
-check "the enrollment belongs to them" "$((S2_BEFORE + 1))" \
+check "the request belongs to them" "$((S2_BEFORE + 1))" \
   "$(rows '/api/enrollments?pagination[pageSize]=100' "$T_S2")"
 # Without a `user` the row would belong to nobody, and the `find` scope on
 # enrollments is by user — so an unowned row is invisible to its own student. That
@@ -605,18 +626,140 @@ check "the enrollment belongs to them" "$((S2_BEFORE + 1))" \
 # on the account that asked for it rather than on whoever happened to be first.
 check "and not to another student" 0 \
   "$(rows "/api/enrollments?filters[course][documentId]=$SMOKE_COURSE_ID&pagination[pageSize]=100" "$T_S1")"
-check "enrolling again is a conflict" 409 \
+# A pending request is still a row, so asking twice conflicts rather than queueing a
+# second one.
+check "requesting again is a conflict" 409 \
   "$(status POST '/api/enrollments' "$T_S2" "{\"data\":{\"course\":\"$SMOKE_COURSE_ID\"}}")"
 
-# Cleaned up in dependency order — the enrollment first, so deleting the course
-# cannot leave an orphan row pointing at a course that no longer exists.
+# The enrollment's own documentId, read from the student's scoped list rather than
+# from the create response, so what is asserted below is the *stored* status and not
+# an echo of the payload.
+SMOKE_ENROL_ID=$(ids \
+  "/api/enrollments?filters[course][documentId]=$SMOKE_COURSE_ID&pagination[pageSize]=100" "$T_S2")
+
+echo
+echo "=== a request is not an enrolment until staff approve it ==="
+check "a new request starts as pending" pending \
+  "$(get "/api/enrollments/$SMOKE_ENROL_ID" "$T_S2" | grep -oP '"current_status":"\K[^"]+')"
+check "a pending student cannot complete a lesson" 403 \
+  "$(status POST "/api/lessons/$SMOKE_LESSON_ID/complete" "$T_S2" '{}')"
+check "a pending student cannot submit its quiz" 403 \
+  "$(status POST "/api/quizzes/$SMOKE_QUIZ_ID/submit" "$T_S2" '{"answers":[1]}')"
+# The bypass, and the assertion that matters most in this section: `/complete` is
+# not the only way to write a completed row, so gating it alone would leave the
+# whole approval step one POST away from irrelevant.
+check "nor write the progress row directly" 403 \
+  "$(status POST '/api/lesson-progresses' "$T_S2" \
+    "{\"data\":{\"lesson\":\"$SMOKE_LESSON_ID\",\"completed\":true}}")"
+check "the student cannot approve their own request" 403 \
+  "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/approve" "$T_S2" '{}')"
+check "an instructor of another course cannot approve it" 403 \
+  "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/approve" "$T_I1" '{}')"
+check "the course's own instructor can" 200 \
+  "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/approve" "$T_I2" '{}')"
+check "and the stored status says so" approved \
+  "$(get "/api/enrollments/$SMOKE_ENROL_ID" "$T_S2" | grep -oP '"current_status":"\K[^"]+')"
+
+echo
+echo "=== a lesson with a quiz is not done until the quiz is passed ==="
+# Approved, so enrolment is no longer what stands in the way — the quiz is.
+check "an approved student still cannot complete a gated lesson" 403 \
+  "$(status POST "/api/lessons/$SMOKE_LESSON_ID/complete" "$T_S2" '{}')"
+check "nor write the progress row directly" 403 \
+  "$(status POST '/api/lesson-progresses' "$T_S2" \
+    "{\"data\":{\"lesson\":\"$SMOKE_LESSON_ID\",\"completed\":true}}")"
+
+WRONG=$(post "/api/quizzes/$SMOKE_QUIZ_ID/submit" "$T_S2" '{"answers":[0]}')
+check "a wrong answer is graded against the hidden key" false \
+  "$(printf '%s' "$WRONG" | grep -oP '"passed":\K(true|false)')"
+check "a lesson quiz records a result" true \
+  "$(printf '%s' "$WRONG" | grep -oP '"recorded":\K(true|false)')"
+# The number the frontend renders comes from here, not from a copy in the client.
+check "the pass mark is reported by the server" 60 \
+  "$(printf '%s' "$WRONG" | grep -oP '"passMark":\K[0-9]+')"
+check "and a failing score still blocks completion" 403 \
+  "$(status POST "/api/lessons/$SMOKE_LESSON_ID/complete" "$T_S2" '{}')"
+
+RIGHT=$(post "/api/quizzes/$SMOKE_QUIZ_ID/submit" "$T_S2" '{"answers":[1]}')
+check "the correct answer passes" true \
+  "$(printf '%s' "$RIGHT" | grep -oP '"passed":\K(true|false)')"
+check "which unlocks the lesson" 200 \
+  "$(status POST "/api/lessons/$SMOKE_LESSON_ID/complete" "$T_S2" '{}')"
+# Un-completing writes through the same endpoint as the forged completion above, so
+# the gate keys on the direction rather than the endpoint. If it did not, the UI's
+# own toggle would be the first thing it broke.
+check "and un-completing is never gated" 201 \
+  "$(status POST '/api/lesson-progresses' "$T_S2" \
+    "{\"data\":{\"lesson\":\"$SMOKE_LESSON_ID\",\"completed\":false}}")"
+# Two submissions, one row: the result is upserted on (user, quiz), so a retake
+# replaces the score rather than appending an attempt.
+check "two attempts leave one result row" 1 \
+  "$(rows '/api/quiz-results?pagination[pageSize]=100' "$T_S2")"
+
+echo
+echo "=== a declined request is final until staff reopen it ==="
+check "the course's instructor can decline" 200 \
+  "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/reject" "$T_I2" '{}')"
+check "a declined student loses access again" 403 \
+  "$(status POST "/api/lessons/$SMOKE_LESSON_ID/complete" "$T_S2" '{}')"
+check "their own retry is a conflict, not a fresh request" 409 \
+  "$(status POST '/api/enrollments' "$T_S2" "{\"data\":{\"course\":\"$SMOKE_COURSE_ID\"}}")"
+check "and no second row appeared" 1 \
+  "$(rows '/api/enrollments?pagination[pageSize]=100' "$T_S2")"
+check "a student cannot reopen it themselves" 403 \
+  "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/reopen" "$T_S2" '{}')"
+check "staff can" 200 \
+  "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/reopen" "$T_I2" '{}')"
+check "which returns it to pending" pending \
+  "$(get "/api/enrollments/$SMOKE_ENROL_ID" "$T_S2" | grep -oP '"current_status":"\K[^"]+')"
+
+echo
+echo "=== a quiz only a lesson reaches still has an owner ==="
+# A quiz reaches its course through `course`, `parent_course`, or the lesson it
+# gates. Before the third was resolved, a lesson-only quiz — the normal case for a
+# gated lesson — had no course, so `can-manage-quiz` denied every write on it,
+# including an admin's. And an instructor could pair their own `parent_course` with
+# someone else's `lesson` in one create and gate a lesson they do not own.
+check "another instructor cannot gate this lesson with their quiz" 403 \
+  "$(status POST '/api/quizzes' "$T_I1" \
+    "{\"data\":{\"parent_course\":\"$COURSE\",\"lesson\":\"$SMOKE_LESSON_ID\"}}")"
+check "another instructor cannot empty its questions" 403 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I1" '{"data":{"Question":[]}}')"
+check "the lesson's own instructor can write to it" 200 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I2" '{"data":{}}')"
+check "and so can an admin" 200 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_ADMIN" '{"data":{}}')"
+
+echo
+# Cleaned up in dependency order — the rows that point at the course before the
+# course itself, so nothing is left pointing at something that no longer exists.
+# Each delete is its own assertion: a cleanup that silently fails would surface as
+# an unrelated scoping failure on the *next* run, two hundred lines earlier.
+check "one progress row was left behind to clean up" 1 \
+  "$(rows '/api/lesson-progresses?pagination[pageSize]=100' "$T_S2")"
+for created in $(ids '/api/quiz-results?pagination[pageSize]=100' "$T_S2"); do
+  check "the smoke quiz result is cleaned up" 204 \
+    "$(status DELETE "/api/quiz-results/$created" "$T_ADMIN")"
+done
+# Deleting the lesson does not take its progress rows with it — Strapi drops the
+# relation link, not the related entry — so these go first and explicitly.
+for created in $(ids '/api/lesson-progresses?pagination[pageSize]=100' "$T_S2"); do
+  check "the smoke progress row is cleaned up" 204 \
+    "$(status DELETE "/api/lesson-progresses/$created" "$T_ADMIN")"
+done
 for created in $(ids "/api/enrollments?filters[course][documentId]=$SMOKE_COURSE_ID&pagination[pageSize]=100" "$T_ADMIN"); do
   check "the smoke enrollment is cleaned up" 204 \
     "$(status DELETE "/api/enrollments/$created" "$T_ADMIN")"
 done
+check "the smoke quiz is cleaned up" 204 \
+  "$(status DELETE "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I2")"
+check "the smoke lesson is cleaned up" 204 \
+  "$(status DELETE "/api/lessons/$SMOKE_LESSON_ID" "$T_I2")"
 check "the smoke course is cleaned up" 204 \
   "$(status DELETE "/api/courses/$SMOKE_COURSE_ID" "$T_I2")"
 check "leaving the catalog as it was" 1 "$(rows '/api/courses?pagination[pageSize]=100' "$T_S1")"
+check "and student2 owning nothing again" 0 \
+  "$(rows '/api/lesson-progresses?pagination[pageSize]=100' "$T_S2")"
 
 echo
 printf 'pass=%s fail=%s\n' "$pass" "$fail"

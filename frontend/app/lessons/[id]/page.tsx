@@ -12,6 +12,11 @@
  * A lesson whose quiz has not been passed cannot be completed and does not release
  * its Next link. The UI only mirrors that — the API refuses the write either way,
  * on both `/lessons/:id/complete` and `POST /api/lesson-progresses`.
+ *
+ * One state is not a lock, though it looks like one: a lesson already completed
+ * whose quiz was then retaken and failed. The gate reads the latest score, so it
+ * reports a failure — but the completion stands on the server, and taking the Next
+ * link back would punish the student for practising. See `locked` below.
  */
 
 import Link from 'next/link';
@@ -145,7 +150,49 @@ function LessonView() {
   const quizPassed = current?.quizPassed ?? true;
   const quizScore = current?.quizScore ?? null;
   const passMark = progress?.quizPassMark ?? null;
-  const locked = quizRequired && !quizPassed;
+
+  // Whether this lesson still stands between the student and the next one.
+  //
+  // `completed` belongs in here rather than being handled as an exception at each
+  // use. `quizPassed` reports the *latest* score, so retaking a passed quiz and
+  // doing worse flips it back to false — and that must not confiscate a lesson the
+  // student already finished. The server agrees: it only accepted the completion
+  // because the quiz was passed at the time, and it never takes one back.
+  const locked = quizRequired && !quizPassed && !completed;
+
+  /**
+   * What to say about the quiz.
+   *
+   * Depends on completion as much as on the score, because the two can disagree: a
+   * lesson is complete with a failing latest score whenever the student retook its
+   * quiz after finishing it, and telling them to "take it again to unlock" a lesson
+   * they have already done would be nonsense.
+   */
+  const quizNote = (() => {
+    if (!quizRequired) {
+      return 'This quiz has no questions yet, so it does not affect the lesson.';
+    }
+
+    if (quizScore === null) {
+      return `Pass this quiz${
+        passMark === null ? '' : ` with ${passMark}% or more`
+      } to complete the lesson and move on.`;
+    }
+
+    const scored = `You scored ${quizScore}%`;
+    const needed = passMark === null ? '' : `, and ${passMark}% is needed`;
+
+    if (completed) {
+      // Nothing here is a condition any more, whichever way the last attempt went.
+      return quizPassed
+        ? `${scored}. This lesson is complete — retaking the quiz cannot undo that.`
+        : `${scored}${needed}. This lesson is already complete, so that stands.`;
+    }
+
+    return quizPassed
+      ? `${scored}. This lesson is unlocked — mark it complete below.`
+      : `${scored}${needed}. Take it again to unlock the lesson.`;
+  })();
 
   return (
     <Page
@@ -202,15 +249,7 @@ function LessonView() {
             }
           >
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className={muted}>
-                {!quizRequired
-                  ? 'This quiz has no questions yet, so it does not affect the lesson.'
-                  : quizPassed
-                    ? `You scored ${quizScore}%. This lesson is unlocked — retaking the quiz cannot undo that.`
-                    : quizScore === null
-                      ? `Pass this quiz${passMark === null ? '' : ` with ${passMark}% or more`} to complete the lesson and move on.`
-                      : `You scored ${quizScore}%${passMark === null ? '' : `, and ${passMark}% is needed`}. Take it again to unlock the lesson.`}
-              </p>
+              <p className={muted}>{quizNote}</p>
               <Link
                 href={`/quizzes/${quizId}`}
                 className={locked ? btnPrimary : btnSecondary}
@@ -234,10 +273,10 @@ function LessonView() {
                   <button
                     type="button"
                     onClick={toggle}
-                    // Un-completing stays available whatever the quiz says: it is
-                    // the only route back from done, and the API allows it for the
-                    // same reason.
-                    disabled={saving || (locked && !completed)}
+                    // `locked` already excludes a completed lesson, so un-completing
+                    // stays available whatever the quiz says: it is the only route
+                    // back from done, and the API allows it for the same reason.
+                    disabled={saving || locked}
                     className={completed ? btnSecondary : btnPrimary}
                   >
                     {saving
@@ -247,7 +286,7 @@ function LessonView() {
                         : 'Mark this lesson complete'}
                   </button>
                   <span className={muted}>
-                    {locked && !completed
+                    {locked
                       ? 'Pass the lesson quiz first.'
                       : 'The server recounts your progress on every change.'}
                   </span>

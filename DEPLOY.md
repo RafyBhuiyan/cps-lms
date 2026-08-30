@@ -132,6 +132,15 @@ admin-panel accounts, which is why step 3 came first.
    cd backend && DATABASE_CLIENT=postgres DATABASE_URL='<DATABASE_PUBLIC_URL>' DATABASE_SSL=true DATABASE_SSL_REJECT_UNAUTHORIZED=false npm run permissions
    ```
 
+4. Then the same line with `npm run backfill:enrollments`. Enrolments created
+   before `current_status` existed have no status, and a student part-way through a
+   course should not be dropped back into a queue — this sets those rows to
+   `approved` and touches nothing else. Idempotent, so re-running is a no-op.
+
+   Skipping it is not a lockout — `isEnrolled` reads a null status as approved for
+   exactly this reason — but the roster shows those students correctly only once it
+   has run.
+
 ### B. Fresh start
 
 Nothing you authored in the dashboard comes across; you get the demo data instead.
@@ -148,6 +157,10 @@ Nothing you authored in the dashboard comes across; you get the demo data instea
    ```
 
    Then the same line with `npm run seed`.
+
+3. Finally the same line with `npm run backfill:enrollments`. A fresh seed writes a
+   status on every enrolment it creates, so this finds nothing — run it anyway, so
+   the one command sequence works whichever branch you took.
 
 Either way: the demo accounts (`student`, `instructor`, `cm`, `admin`
 `@demo.test`) share one password that is committed in `scripts/seed.js`. On a

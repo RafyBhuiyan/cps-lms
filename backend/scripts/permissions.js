@@ -127,6 +127,11 @@ const MATRIX = {
     'api::enrollment.enrollment.delete',
     'api::lesson-progress.lesson-progress.find',
     'api::lesson-progress.lesson-progress.findOne',
+    // Deleting a lesson does not take its progress rows with it — Strapi drops the
+    // relation link, not the related entry — so without this an orphaned row is
+    // unremovable over REST by anybody. `verify.sh` needs it to clean up after the
+    // student it drives through a gated lesson.
+    'api::lesson-progress.lesson-progress.delete',
     'api::quiz-result.quiz-result.find',
     'api::quiz-result.quiz-result.findOne',
     'api::quiz-result.quiz-result.delete',

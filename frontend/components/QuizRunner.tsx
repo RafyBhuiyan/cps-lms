@@ -89,6 +89,16 @@ export function QuizRunner({
               ? 'Recorded as your grade for this course. Retaking replaces it with the latest score.'
               : 'Practice quiz — scored for feedback only, nothing is recorded.'}
           </p>
+          {/* A lesson quiz is the one kind whose score decides something beyond the
+              grade book, and the score alone does not say which way it went. Both
+              figures come from the server's own verdict, not from comparing them here. */}
+          {result.isLesson ? (
+            <p className={`mt-2 font-medium ${result.passed ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+              {result.passed
+                ? 'You passed — the lesson is unlocked. Go back to it to mark it complete.'
+                : `${result.passMark}% is needed to unlock the lesson. Try again.`}
+            </p>
+          ) : null}
         </div>
       ) : null}
 

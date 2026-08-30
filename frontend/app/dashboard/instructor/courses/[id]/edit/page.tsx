@@ -249,6 +249,17 @@ function CourseEdit() {
     (a, b) => (a.sequenceOrder ?? 0) - (b.sequenceOrder ?? 0)
   );
 
+  /**
+   * The full record for each quiz, by documentId.
+   *
+   * Needed because the course populate stops at the lesson's `quiz`: that copy
+   * arrives with scalars only — no `Question` component and none of its own
+   * relations. Deepening the populate would slow the course page down for a fact
+   * only this page uses, and the full list is already here for the picker, so the
+   * rows below resolve through this instead.
+   */
+  const quizById = new Map(quizzes.map((quiz) => [quiz.documentId, quiz]));
+
   const titleValue = courseEdits.title ?? course.title;
   const descriptionValue = courseEdits.description ?? course.description ?? '';
   const coverValue = courseEdits.coverUrl ?? course.coverUrl ?? '';
@@ -529,63 +540,74 @@ function CourseEdit() {
             </Empty>
           ) : (
             <ul className="space-y-3">
-              {lessons.map((lesson, index) => (
-                <li key={lesson.documentId} className={card}>
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <p className="font-medium">
-                        <span className={`mr-3 tabular-nums ${muted}`}>
-                          {lesson.sequenceOrder ?? index + 1}
-                        </span>
-                        {lesson.title}
-                      </p>
-                      <p className={`mt-1 ${muted}`}>
-                        {lesson.quiz ? (
-                          <>
-                            Quiz {quizLabel(lesson.quiz)}
-                            {(lesson.quiz.Question?.length ?? 0) === 0 ? (
-                              <> — no questions, so it gates nothing yet</>
-                            ) : null}
-                          </>
-                        ) : (
-                          'No quiz'
-                        )}
-                      </p>
+              {lessons.map((lesson, index) => {
+                // Resolved through `quizById`, never read off `lesson.quiz` directly —
+                // that copy has no questions on it, so the count would always read 0
+                // and the badge would never show. Falls back to the shallow copy if the
+                // quiz somehow is not in the list, which keeps the id visible.
+                const quiz = lesson.quiz
+                  ? (quizById.get(lesson.quiz.documentId) ?? lesson.quiz)
+                  : null;
+                // An empty quiz gates nothing: the backend's gate asks whether the
+                // student passed, and a quiz with no questions scores 100%.
+                const gates = (quiz?.Question?.length ?? 0) > 0;
+
+                return (
+                  <li key={lesson.documentId} className={card}>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex-1">
+                        <p className="font-medium">
+                          <span className={`mr-3 tabular-nums ${muted}`}>
+                            {lesson.sequenceOrder ?? index + 1}
+                          </span>
+                          {lesson.title}
+                        </p>
+                        <p className={`mt-1 ${muted}`}>
+                          {quiz ? (
+                            <>
+                              Quiz {quizLabel(quiz)}
+                              {gates ? null : (
+                                <> — no questions, so it gates nothing yet</>
+                              )}
+                            </>
+                          ) : (
+                            'No quiz'
+                          )}
+                        </p>
+                      </div>
+
+                      <div className="flex shrink-0 items-center gap-2">
+                        {gates ? <Badge>Gated</Badge> : null}
+                        <Link href={`/lessons/${lesson.documentId}`} className={btnSecondary}>
+                          View
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() => openEdit(lesson)}
+                          disabled={savingLesson || deleting !== null}
+                          className={btnSecondary}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void removeLesson(lesson)}
+                          disabled={savingLesson || deleting !== null}
+                          className={btnSecondary}
+                        >
+                          {deleting === lesson.documentId ? 'Deleting…' : 'Delete'}
+                        </button>
+                      </div>
                     </div>
 
-                    <div className="flex shrink-0 items-center gap-2">
-                      {lesson.quiz && (lesson.quiz.Question?.length ?? 0) > 0 ? (
-                        <Badge>Gated</Badge>
-                      ) : null}
-                      <Link href={`/lessons/${lesson.documentId}`} className={btnSecondary}>
-                        View
-                      </Link>
-                      <button
-                        type="button"
-                        onClick={() => openEdit(lesson)}
-                        disabled={savingLesson || deleting !== null}
-                        className={btnSecondary}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void removeLesson(lesson)}
-                        disabled={savingLesson || deleting !== null}
-                        className={btnSecondary}
-                      >
-                        {deleting === lesson.documentId ? 'Deleting…' : 'Delete'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {editing?.id === lesson.documentId ? (
-                    <div className="mt-4 border-t border-black/10 pt-4 dark:border-white/15">
-                      {lessonForm}
-                    </div>
-                  ) : null}
-                </li>
-              ))}
+                    {editing?.id === lesson.documentId ? (
+                      <div className="mt-4 border-t border-black/10 pt-4 dark:border-white/15">
+                        {lessonForm}
+                      </div>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </Panel>
