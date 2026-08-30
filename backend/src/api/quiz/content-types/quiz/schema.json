@@ -33,6 +33,12 @@
       "relation": "manyToOne",
       "target": "api::course.course",
       "inversedBy": "practice_quizzes"
+    },
+    "lesson": {
+      "type": "relation",
+      "relation": "oneToOne",
+      "target": "api::lesson.lesson",
+      "inversedBy": "quiz"
     }
   }
 }

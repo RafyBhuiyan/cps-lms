@@ -5,7 +5,12 @@
 import { factories } from '@strapi/strapi';
 import type { Context } from 'koa';
 import { isStudent } from '../../../utils/roles';
-import { isEnrolled, resolveQuizCourse, upsertOne } from '../../../utils/lms';
+import {
+  QUIZ_PASS_SCORE,
+  isEnrolled,
+  resolveQuizCourse,
+  upsertOne,
+} from '../../../utils/lms';
 
 type Question = {
   questionText?: string;
@@ -36,7 +41,7 @@ export default factories.createCoreController('api::quiz.quiz', () => ({
     }
 
     const { documentId } = ctx.params;
-    const { quiz, course, isFinal } = await resolveQuizCourse(documentId);
+    const { quiz, course, isFinal, isLesson } = await resolveQuizCourse(documentId);
 
     if (!quiz) {
       return ctx.notFound('Quiz not found.');
@@ -88,11 +93,14 @@ export default factories.createCoreController('api::quiz.quiz', () => ({
     const score =
       totalQuestions === 0 ? 0 : Math.round((correctCount / totalQuestions) * 10000) / 100;
 
-    // Only the final quiz produces a stored grade. Practice quizzes are graded
-    // for immediate on-screen feedback and persist nothing.
+    // Final and lesson quizzes produce a stored grade; practice quizzes are graded
+    // for immediate on-screen feedback and persist nothing. A lesson quiz has to be
+    // recorded because the QuizResult row *is* the completion gate — see
+    // `lessonQuizGate`; without it a passing score would be forgotten the moment
+    // the response was rendered.
     let recorded = false;
 
-    if (isFinal) {
+    if (isFinal || isLesson) {
       await upsertOne(
         'api::quiz-result.quiz-result',
         { user: { id: user.id }, quiz: { documentId: quiz.documentId } },
@@ -111,8 +119,13 @@ export default factories.createCoreController('api::quiz.quiz', () => ({
         quizId: quiz.documentId,
         courseId: course.documentId,
         isFinal,
+        isLesson,
+        /** The lesson this quiz gates, when it gates one. */
+        lessonId: (quiz as any).lesson?.documentId ?? null,
         recorded,
         score,
+        passMark: QUIZ_PASS_SCORE,
+        passed: score >= QUIZ_PASS_SCORE,
         correctCount,
         totalQuestions,
         results,

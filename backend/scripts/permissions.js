@@ -46,6 +46,16 @@ const MANAGE_CONTENT = [
 ];
 
 /**
+ * Deciding on an enrolment request. Ownership is enforced in the controller — an
+ * instructor holding these may still only act on their own courses.
+ */
+const DECIDE_ENROLLMENT = [
+  'api::enrollment.enrollment.approve',
+  'api::enrollment.enrollment.reject',
+  'api::enrollment.enrollment.reopen',
+];
+
+/**
  * What each role may call. Ownership is *not* expressed here — the policies and
  * controllers narrow these further (an instructor holding `course.update` may
  * still only update their own courses).
@@ -72,6 +82,7 @@ const MATRIX = {
   instructor: [
     ...READ_CONTENT,
     ...MANAGE_CONTENT,
+    ...DECIDE_ENROLLMENT,
     'api::enrollment.enrollment.find',
     'api::enrollment.enrollment.findOne',
     'api::lesson-progress.lesson-progress.find',
@@ -86,6 +97,7 @@ const MATRIX = {
   content_manager: [
     ...READ_CONTENT,
     ...MANAGE_CONTENT,
+    ...DECIDE_ENROLLMENT,
     'api::blog.blog.create',
     'api::blog.blog.update',
     'api::blog.blog.delete',
@@ -103,6 +115,7 @@ const MATRIX = {
   admin: [
     ...READ_CONTENT,
     ...MANAGE_CONTENT,
+    ...DECIDE_ENROLLMENT,
     'api::blog.blog.create',
     'api::blog.blog.update',
     'api::blog.blog.delete',

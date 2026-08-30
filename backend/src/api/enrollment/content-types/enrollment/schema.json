@@ -25,6 +25,15 @@
     },
     "enrolledAt": {
       "type": "datetime"
+    },
+    "current_status": {
+      "type": "enumeration",
+      "default": "pending",
+      "enum": [
+        "pending",
+        "approved",
+        "rejected"
+      ]
     }
   }
 }

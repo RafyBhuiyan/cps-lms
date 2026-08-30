@@ -7,10 +7,12 @@ import type { Context } from 'koa';
 import { isAdmin } from '../../../utils/roles';
 import {
   ANY_VERSION,
+  ENROLLMENT_STATUS,
   NO_LIMIT,
   attachOwner,
   canManageCourse,
   computeCourseProgress,
+  isEnrollmentActive,
   scopeQueryToDocuments,
   uniqueSlug,
 } from '../../../utils/lms';
@@ -196,8 +198,16 @@ export default factories.createCoreController('api::course.course', () => ({
   /**
    * GET /api/courses/:documentId/students-progress
    *
-   * Every enrolled student's progress in one course. Restricted to users who can
-   * manage the course, so one instructor cannot read another's roster.
+   * Every enrolled student's progress in one course, plus the enrolment requests
+   * still waiting on a decision. Restricted to users who can manage the course, so
+   * one instructor cannot read another's roster.
+   *
+   * The pending queue is served from here rather than from the enrollment endpoint
+   * because it needs student *names*, and `GET /api/enrollments?populate[user]`
+   * cannot supply them: populating through a relation whose target is the
+   * users-permissions user is rejected for every role but admin. This handler
+   * already populates `user` behind the same `canManageCourse` check, so the queue
+   * needs no new endpoint and no new permission.
    */
   async studentsProgress(ctx: Context) {
     const { user } = ctx.state;
@@ -229,17 +239,23 @@ export default factories.createCoreController('api::course.course', () => ({
       ...ANY_VERSION,
     });
 
+    const withUser = enrollments.filter((enrollment: any) => enrollment.user);
+
+    // Approved students have progress worth showing. Pending and rejected ones do
+    // not — they have never been able to complete anything — so they are listed
+    // separately as decisions to make rather than as rows of 0%.
+    const active = withUser.filter(isEnrollmentActive);
+    const undecided = withUser.filter((enrollment: any) => !isEnrollmentActive(enrollment));
+
     const students = await Promise.all(
-      enrollments
-        .map((enrollment: any) => enrollment.user)
-        .filter(Boolean)
-        .map(async (student: any) => ({
-          userId: student.id,
-          username: student.username,
-          email: student.email,
-          ...(await computeCourseProgress(student.id, documentId)),
-          finalQuiz: await finalQuizScore(course, student.id),
-        }))
+      active.map(async (enrollment: any) => ({
+        userId: enrollment.user.id,
+        username: enrollment.user.username,
+        email: enrollment.user.email,
+        enrollmentId: enrollment.documentId,
+        ...(await computeCourseProgress(enrollment.user.id, documentId)),
+        finalQuiz: await finalQuizScore(course, enrollment.user.id),
+      }))
     );
 
     return {
@@ -248,6 +264,17 @@ export default factories.createCoreController('api::course.course', () => ({
         totalStudents: students.length,
         // Least-progressed first: the list exists to spot who is falling behind.
         students: students.sort((a, b) => a.progressPercent - b.progressPercent),
+        pendingRequests: undecided
+          .map((enrollment: any) => ({
+            enrollmentId: enrollment.documentId,
+            userId: enrollment.user.id,
+            username: enrollment.user.username,
+            email: enrollment.user.email,
+            currentStatus: enrollment.current_status ?? ENROLLMENT_STATUS.PENDING,
+            requestedAt: enrollment.enrolledAt ?? enrollment.createdAt ?? null,
+          }))
+          // Oldest request first — the person who has been waiting longest.
+          .sort((a: any, b: any) => String(a.requestedAt).localeCompare(String(b.requestedAt))),
       },
     };
   },

@@ -11,6 +11,7 @@
     "develop": "strapi develop",
     "seed": "node scripts/seed.js",
     "permissions": "node scripts/permissions.js",
+    "backfill:enrollments": "node scripts/backfill-enrollment-status.js",
     "start": "strapi start",
     "strapi": "strapi",
     "upgrade": "npx @strapi/upgrade latest",

@@ -7,8 +7,10 @@ import type { Context } from 'koa';
 import { isStudent } from '../../../utils/roles';
 import {
   PUBLISHED,
+  QUIZ_PASS_SCORE,
   computeCourseProgress,
   isEnrolled,
+  lessonQuizGate,
   upsertOne,
 } from '../../../utils/lms';
 
@@ -55,6 +57,20 @@ export default factories.createCoreController('api::lesson.lesson', () => ({
     // Without this, any student could mark progress on any course's lessons.
     if (!(await isEnrolled(user.id, course.documentId))) {
       return ctx.forbidden('You must be enrolled in this course to complete its lessons.');
+    }
+
+    // A lesson with a quiz cannot be ticked off until that quiz is passed. Enforced
+    // here *and* in `lesson-progress.create`, which students also hold and which
+    // accepts `completed: true` directly — a gate on only one of the two would be
+    // one POST away from irrelevant.
+    const gate = await lessonQuizGate(user.id, lesson.documentId);
+
+    if (gate.quizRequired && !gate.quizPassed) {
+      return ctx.forbidden(
+        gate.latestScore === null
+          ? `You must pass this lesson's quiz (${QUIZ_PASS_SCORE}% or higher) before completing the lesson.`
+          : `You scored ${gate.latestScore}% on this lesson's quiz; ${QUIZ_PASS_SCORE}% is needed to complete the lesson.`
+      );
     }
 
     await upsertOne(

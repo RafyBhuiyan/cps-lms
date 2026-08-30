@@ -43,6 +43,12 @@ export type ProgressLesson = {
   title: string;
   sequenceOrder: number | null;
   completed: boolean;
+  /** The attached quiz, if the lesson has one. */
+  quizId: string | null;
+  /** Whether that quiz gates completion — see `lessonQuizGate`. */
+  quizRequired: boolean;
+  /** True when no quiz gates the lesson, so `quizRequired && !quizPassed` is the lock. */
+  quizPassed: boolean;
 };
 
 export type CourseProgress = {
@@ -51,6 +57,14 @@ export type CourseProgress = {
   progressPercent: number;
   lessons: ProgressLesson[];
 };
+
+/**
+ * The mark a lesson's quiz must reach before that lesson can be completed.
+ *
+ * Compared directly against `QuizResult.latestScore` because `quiz.submit` stores
+ * a 0-100 percentage, not a raw count (quiz.ts: `(correct / total) * 10000 / 100`).
+ */
+export const QUIZ_PASS_SCORE = 60;
 
 /**
  * `strapi.documents()` is generic per-UID and its `data` types are strict; these
@@ -116,10 +130,15 @@ export const uniqueSlug = async (
 /* -------------------------------------------------------------------------- */
 
 /**
- * A quiz reaches its course by one of two relations: `course` (the 1:1 set from
- * `Course.final_quiz`) or `parent_course` (the N:1 set from
- * `Course.practice_quizzes`). Which one is populated is what makes a quiz final
- * or practice — there is no boolean flag on the quiz itself.
+ * A quiz reaches its course by one of three relations: `course` (the 1:1 set from
+ * `Course.final_quiz`), `parent_course` (the N:1 set from
+ * `Course.practice_quizzes`), or — for a quiz attached to a lesson — through that
+ * lesson's own course. Which one is populated is what makes a quiz final,
+ * practice or lesson-level; there is no type flag on the quiz itself.
+ *
+ * The `lesson` hop is not optional. A lesson quiz sets neither course relation, so
+ * without it `submit` answers `400 This quiz is not linked to a course` and a
+ * lesson quiz can never be graded at all.
  */
 export const resolveQuizCourse = async (quizDocumentId: string) => {
   const quiz = await docs('api::quiz.quiz').findOne({
@@ -127,21 +146,123 @@ export const resolveQuizCourse = async (quizDocumentId: string) => {
     // correctOptionIndex is `private`, which only strips it from REST output —
     // the Document Service still returns it, which is what makes server-side
     // grading possible.
-    populate: ['Question', 'course', 'parent_course'],
+    populate: {
+      Question: true,
+      course: true,
+      parent_course: true,
+      lesson: { populate: ['course'] },
+    },
     ...PUBLISHED,
   });
 
   if (!quiz) {
-    return { quiz: null, course: null, isFinal: false };
+    return { quiz: null, course: null, isFinal: false, isLesson: false };
   }
 
   const isFinal = Boolean(quiz.course);
-  return { quiz, course: quiz.course ?? quiz.parent_course ?? null, isFinal };
+  const isLesson = Boolean(quiz.lesson);
+
+  return {
+    quiz,
+    course: quiz.course ?? quiz.parent_course ?? quiz.lesson?.course ?? null,
+    isFinal,
+    isLesson,
+  };
+};
+
+export type LessonQuizGate = {
+  quizId: string | null;
+  /** Whether a quiz stands between the student and completing this lesson. */
+  quizRequired: boolean;
+  /** True whenever nothing is required, so callers can read this alone as "may complete". */
+  quizPassed: boolean;
+  latestScore: number | null;
+};
+
+/**
+ * `latestScore` is a `decimal`, and Postgres `numeric` arrives through `pg` as a
+ * *string*. `'9' >= 60` is false and so is `'100' >= 60`, so relying on `>=` to
+ * coerce would pass locally on SQLite and silently mis-grade on Railway. The
+ * conversion is made explicit instead.
+ */
+const toScore = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const score = Number(value);
+  return Number.isFinite(score) ? score : null;
+};
+
+/**
+ * Whether a student has cleared the quiz attached to a lesson.
+ *
+ * Two cases are deliberately *not* gated. A lesson with no quiz, obviously. And a
+ * lesson whose quiz has no questions: `quiz.submit` scores a question-less quiz 0,
+ * which can never reach `QUIZ_PASS_SCORE`, so gating on it would lock that lesson
+ * permanently with no way for the student to clear it.
+ *
+ * The lesson is read `PUBLISHED` to match `lesson.complete`, which means an
+ * unpublished quiz does not gate anything — consistent with `resolveQuizCourse`,
+ * where an unpublished quiz cannot be submitted either.
+ */
+export const lessonQuizGate = async (
+  userId: number,
+  lessonDocumentId: string
+): Promise<LessonQuizGate> => {
+  const lesson = await docs('api::lesson.lesson').findOne({
+    documentId: lessonDocumentId,
+    populate: { quiz: { populate: ['Question'] } },
+    ...PUBLISHED,
+  });
+
+  const quiz = lesson?.quiz;
+  const questions = Array.isArray(quiz?.Question) ? quiz.Question : [];
+
+  if (!quiz || questions.length === 0) {
+    return {
+      quizId: quiz?.documentId ?? null,
+      quizRequired: false,
+      quizPassed: true,
+      latestScore: null,
+    };
+  }
+
+  const [result] = await docs('api::quiz-result.quiz-result').findMany({
+    filters: { user: { id: userId }, quiz: { documentId: quiz.documentId } },
+    limit: 1,
+    ...ANY_VERSION,
+  });
+
+  const latestScore = toScore(result?.latestScore);
+
+  return {
+    quizId: quiz.documentId,
+    quizRequired: true,
+    quizPassed: latestScore !== null && latestScore >= QUIZ_PASS_SCORE,
+    latestScore,
+  };
 };
 
 /* -------------------------------------------------------------------------- */
 /* Enrollment                                                                 */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The three states of `Enrollment.current_status`.
+ *
+ * Named `current_status` in the schema rather than `status`, which would have been
+ * a trap: `status` is also the Document Service's draft/publish selector (see
+ * `PUBLISHED` above), so `filters: { status: ... }` next to `...PUBLISHED` would
+ * read as the same key meaning two different things.
+ */
+export const ENROLLMENT_STATUS = {
+  PENDING: 'pending',
+  APPROVED: 'approved',
+  REJECTED: 'rejected',
+} as const;
+
+export type EnrollmentStatus = (typeof ENROLLMENT_STATUS)[keyof typeof ENROLLMENT_STATUS];
 
 export const findEnrollment = async (userId: number, courseDocumentId: string) => {
   const [enrollment] = await docs('api::enrollment.enrollment').findMany({
@@ -156,8 +277,36 @@ export const findEnrollment = async (userId: number, courseDocumentId: string) =
   return enrollment ?? null;
 };
 
+/**
+ * Whether an enrollment row grants access.
+ *
+ * Anything that is not explicitly `pending` or `rejected` counts as approved, and
+ * that includes a null status. Only rows written before `current_status` existed
+ * can be null, so treating them as approved means a forgotten backfill degrades to
+ * "nothing changed for existing students" instead of locking a class out mid-course.
+ * New requests are never null: the controller sets `pending` explicitly, and the
+ * schema default covers rows created in the admin panel.
+ */
+export const isEnrollmentActive = (enrollment: any): boolean => {
+  if (!enrollment) {
+    return false;
+  }
+
+  const status = enrollment.current_status;
+
+  return status !== ENROLLMENT_STATUS.PENDING && status !== ENROLLMENT_STATUS.REJECTED;
+};
+
+/**
+ * The one gate behind `lesson.complete`, `quiz.submit` and
+ * `lesson-progress.create`. Approval-aware, so a pending student can browse a
+ * course but records no progress and submits no quizzes.
+ *
+ * `findEnrollment` stays status-agnostic on purpose: `enrollment.create` needs it
+ * to spot an existing pending row and answer 409 rather than open a second request.
+ */
 export const isEnrolled = async (userId: number, courseDocumentId: string) =>
-  Boolean(await findEnrollment(userId, courseDocumentId));
+  isEnrollmentActive(await findEnrollment(userId, courseDocumentId));
 
 /* -------------------------------------------------------------------------- */
 /* Course ownership                                                           */
@@ -284,6 +433,10 @@ export const computeCourseProgress = async (
   const lessons = await docs('api::lesson.lesson').findMany({
     filters: { course: { documentId: courseDocumentId } },
     fields: ['title', 'sequenceOrder'],
+    // The quiz comes along so the caller learns which lessons are gated without a
+    // per-lesson round trip. `Question` is needed too: a quiz with no questions
+    // gates nothing (see `lessonQuizGate`).
+    populate: { quiz: { populate: ['Question'] } },
     sort: ['sequenceOrder:asc', 'createdAt:asc'],
     limit: NO_LIMIT,
     ...PUBLISHED,
@@ -320,16 +473,52 @@ export const computeCourseProgress = async (
 
   const completedLessons = completedLessonIds.size;
 
+  // Which lesson quizzes this student has passed, in one query rather than one per
+  // lesson. A lesson is gated only when its quiz actually carries questions.
+  const gatedQuizIds = lessons
+    .filter((lesson: any) => (lesson.quiz?.Question?.length ?? 0) > 0)
+    .map((lesson: any) => lesson.quiz.documentId);
+
+  const passedQuizIds = new Set<string>();
+
+  if (gatedQuizIds.length > 0) {
+    const results = await docs('api::quiz-result.quiz-result').findMany({
+      filters: { user: { id: userId }, quiz: { documentId: { $in: gatedQuizIds } } },
+      populate: ['quiz'],
+      limit: NO_LIMIT,
+      ...ANY_VERSION,
+    });
+
+    for (const result of results) {
+      const score = toScore((result as any).latestScore);
+      const quizId = (result as any).quiz?.documentId;
+
+      if (quizId && score !== null && score >= QUIZ_PASS_SCORE) {
+        passedQuizIds.add(quizId);
+      }
+    }
+  }
+
   return {
     completedLessons,
     totalLessons,
     progressPercent: Math.round((completedLessons / totalLessons) * 100),
-    lessons: lessons.map((lesson: any) => ({
-      documentId: lesson.documentId,
-      title: lesson.title,
-      sequenceOrder: lesson.sequenceOrder ?? null,
-      completed: completedLessonIds.has(lesson.documentId),
-    })),
+    lessons: lessons.map((lesson: any) => {
+      const quizId = lesson.quiz?.documentId ?? null;
+      const quizRequired = (lesson.quiz?.Question?.length ?? 0) > 0;
+
+      return {
+        documentId: lesson.documentId,
+        title: lesson.title,
+        sequenceOrder: lesson.sequenceOrder ?? null,
+        completed: completedLessonIds.has(lesson.documentId),
+        quizId,
+        quizRequired,
+        // Not required means nothing to pass, so `true` — a caller can read
+        // `quizRequired && !quizPassed` as the lock and never special-case.
+        quizPassed: quizRequired ? passedQuizIds.has(quizId) : true,
+      };
+    }),
   };
 };
 

@@ -7,10 +7,14 @@ import type { Context } from 'koa';
 import { isPrivileged, isStudent } from '../../../utils/roles';
 import {
   ANY_VERSION,
+  ENROLLMENT_STATUS,
+  PUBLISHED,
   attachOwner,
+  canManageCourseById,
   findEnrollment,
   manageableCourseIds,
   scopeQueryToDocuments,
+  type EnrollmentStatus,
 } from '../../../utils/lms';
 
 /**
@@ -28,6 +32,66 @@ const scopeForUser = async (user: any): Promise<Record<string, any> | null> => {
 
   const courseIds = await manageableCourseIds(user);
   return { course: { documentId: { $in: courseIds } } };
+};
+
+/**
+ * Shared body of `approve` / `reject` / `reopen`.
+ *
+ * Authorisation lives here rather than in a route policy for two reasons: an
+ * enrollment has no owner of its own — the *course* decides who may act on it, so
+ * the policy would have to re-load the enrollment anyway — and `findOne` above
+ * already authorises this way, so the two cannot drift apart.
+ *
+ * `canManageCourseById` already means exactly "the course's instructor, a content
+ * manager, or an admin", which is the rule this feature asks for, so no new
+ * ownership logic is introduced.
+ */
+const decide = async (ctx: Context, next: EnrollmentStatus, verb: string) => {
+  const { user } = ctx.state;
+
+  if (!user) {
+    return ctx.unauthorized(`You must be logged in to ${verb} an enrolment request.`);
+  }
+
+  const enrollment = await strapi.documents('api::enrollment.enrollment').findOne({
+    documentId: ctx.params.documentId,
+    populate: ['user', 'course'],
+    ...ANY_VERSION,
+  });
+
+  if (!enrollment) {
+    return ctx.notFound('Enrolment request not found.');
+  }
+
+  const courseDocumentId = (enrollment as any).course?.documentId;
+
+  if (!courseDocumentId) {
+    return ctx.badRequest('This enrolment is not linked to a course.');
+  }
+
+  if (!(await canManageCourseById(user, courseDocumentId))) {
+    return ctx.forbidden(
+      `You can only ${verb} enrolment requests for a course you manage.`
+    );
+  }
+
+  const updated = await strapi.documents('api::enrollment.enrollment').update({
+    documentId: enrollment.documentId,
+    data: { current_status: next } as any,
+    // Readers see the published row; writing only the draft would leave the
+    // decision invisible to every check that matters.
+    ...PUBLISHED,
+  });
+
+  return {
+    data: {
+      documentId: enrollment.documentId,
+      current_status: next,
+      courseId: courseDocumentId,
+      userId: (enrollment as any).user?.id ?? null,
+      updatedAt: (updated as any)?.updatedAt ?? null,
+    },
+  };
 };
 
 export default factories.createCoreController('api::enrollment.enrollment', () => ({
@@ -83,9 +147,15 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
   /**
    * POST /api/enrollments
    *
-   * A student enrols *themselves*. The `user` is taken from the token and a
-   * client-supplied one is discarded, so posting someone else's id enrols the
-   * caller rather than the target.
+   * A student *requests* enrolment. The row is created `pending` and grants no
+   * access until the course's instructor, a content manager or an admin approves
+   * it — `isEnrolled` is what reads that, and it gates lesson completion, quiz
+   * submission and progress recording alike.
+   *
+   * The `user` is taken from the token and a client-supplied one is discarded, so
+   * posting someone else's id enrols the caller rather than the target. The status
+   * is overwritten for the same reason: a student cannot approve their own request
+   * by putting `approved` in the payload.
    *
    * The relation is attached after the row exists; see `attachOwner` for why a
    * `user` key in the payload is rejected outright.
@@ -125,14 +195,31 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
     }
 
     // Stands in for the composite unique constraint on (user, course) that
-    // Strapi cannot declare in a schema.
-    if (await findEnrollment(user.id, courseDocumentId)) {
+    // Strapi cannot declare in a schema. Deliberately status-agnostic: a pending
+    // or rejected request already occupies the pair, so a second POST must be a
+    // conflict rather than a duplicate row.
+    const existing = await findEnrollment(user.id, courseDocumentId);
+
+    if (existing) {
+      const status = (existing as any).current_status;
+
+      if (status === ENROLLMENT_STATUS.PENDING) {
+        return ctx.conflict('Your enrolment request is already awaiting approval.');
+      }
+
+      if (status === ENROLLMENT_STATUS.REJECTED) {
+        return ctx.conflict(
+          'Your enrolment request for this course was declined. Contact the instructor to reopen it.'
+        );
+      }
+
       return ctx.conflict('You are already enrolled in this course.');
     }
 
     delete body.data.user;
     body.data.course = { documentId: courseDocumentId };
     body.data.enrolledAt = new Date().toISOString();
+    body.data.current_status = ENROLLMENT_STATUS.PENDING;
 
     const response = (await super.create(ctx)) as { data?: { documentId?: string } };
 
@@ -146,5 +233,26 @@ export default factories.createCoreController('api::enrollment.enrollment', () =
     }
 
     return response;
+  },
+
+  /** POST /api/enrollments/:documentId/approve — the student gains access. */
+  async approve(ctx: Context) {
+    return decide(ctx, ENROLLMENT_STATUS.APPROVED, 'approve');
+  },
+
+  /** POST /api/enrollments/:documentId/reject — declined, and final until reopened. */
+  async reject(ctx: Context) {
+    return decide(ctx, ENROLLMENT_STATUS.REJECTED, 'reject');
+  },
+
+  /**
+   * POST /api/enrollments/:documentId/reopen
+   *
+   * Returns a declined request to pending. A rejection is deliberately final from
+   * the student's side — `create` answers 409 rather than reopening it — so this is
+   * the only way back, and it belongs to staff.
+   */
+  async reopen(ctx: Context) {
+    return decide(ctx, ENROLLMENT_STATUS.PENDING, 'reopen');
   },
 }));

@@ -7,7 +7,9 @@ import type { Context } from 'koa';
 import { isPrivileged, isStudent } from '../../../utils/roles';
 import {
   ANY_VERSION,
+  QUIZ_PASS_SCORE,
   isEnrolled,
+  lessonQuizGate,
   manageableCourseIds,
   scopeQueryToDocuments,
   upsertOne,
@@ -144,6 +146,28 @@ export default factories.createCoreController(
         );
       }
 
+      const completing = body.data.completed !== false;
+
+      // The same quiz gate `/lessons/:id/complete` applies — this endpoint is the
+      // other way to write `completed: true`, so leaving it open would make the gate
+      // decorative.
+      //
+      // Only the completing direction is gated. Un-completing has to stay available
+      // whatever the quiz says: it is the only route back from done (`/complete`
+      // never un-completes), and gating it would strand a student who ticked a
+      // lesson off before its quiz was attached.
+      if (completing) {
+        const gate = await lessonQuizGate(user.id, lessonDocumentId);
+
+        if (gate.quizRequired && !gate.quizPassed) {
+          return ctx.forbidden(
+            gate.latestScore === null
+              ? `You must pass this lesson's quiz (${QUIZ_PASS_SCORE}% or higher) before completing the lesson.`
+              : `You scored ${gate.latestScore}% on this lesson's quiz; ${QUIZ_PASS_SCORE}% is needed to complete the lesson.`
+          );
+        }
+      }
+
       // Upserted, not created: one row per (user, lesson), matching
       // /lessons/:id/complete so the two entry points cannot disagree.
       const { document } = await upsertOne(
@@ -152,8 +176,8 @@ export default factories.createCoreController(
         {
           user: user.id,
           lesson: { documentId: lessonDocumentId },
-          completed: body.data.completed === false ? false : true,
-          completedAt: body.data.completed === false ? null : new Date().toISOString(),
+          completed: completing,
+          completedAt: completing ? new Date().toISOString() : null,
         }
       );
 
