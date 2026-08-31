@@ -11,17 +11,22 @@
 
 import { request, type StrapiList, type StrapiSingle } from './strapi';
 import type {
+  AdminDirectory,
+  AdminUser,
   Blog,
   Course,
   CourseProgress,
   Enrollment,
   EnrollmentDecision,
+  FinalQuizAssignment,
   Lesson,
   LessonCompletion,
   LessonProgress,
+  ManagedQuiz,
   PlatformStats,
   Profile,
   Quiz,
+  QuizQuestionDraft,
   QuizResult,
   QuizSubmission,
   StudentsProgress,
@@ -48,7 +53,8 @@ export const login = (identifier: string, password: string) =>
 
 /**
  * Sign-ups land in the default role, which is Student. Instructor, content
- * manager and admin accounts are assigned in the Strapi dashboard.
+ * manager and admin accounts are assigned by an admin from the Platform
+ * dashboard — see `setUserRole`.
  */
 export const register = (username: string, email: string, password: string) =>
   request<AuthResponse>('/api/auth/local/register', {
@@ -240,6 +246,105 @@ export const submitQuiz = (quizId: string, answers: (number | null)[], token: st
   }).then((r) => r.data);
 
 /* -------------------------------------------------------------------------- */
+/* Quiz authoring                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A quiz *with* its answer key, which no ordinary read returns.
+ *
+ * `correctOptionIndex` is `private`, so it is stripped from `getQuiz` and from
+ * every populate. Without this endpoint an editor would load each question with
+ * its answer blank and wipe the key on the first save. Behind the same ownership
+ * policy as the writes, so an instructor only sees keys for their own courses.
+ */
+export const getManagedQuiz = (documentId: string, token: string) =>
+  request<StrapiSingle<ManagedQuiz>>(`/api/quizzes/${documentId}/manage`, { token }).then(
+    (r) => r.data
+  );
+
+/**
+ * Replace a quiz's question set.
+ *
+ * `private` is output-only in Strapi 5 — the input sanitizer drops ids, non-writable
+ * attributes, unknown fields and restricted relations, and `private` is none of
+ * those — so the answer key travels in this payload with no schema change. The
+ * component is `Question` (capitalised) because that is the attribute name.
+ */
+export const saveQuizQuestions = (
+  documentId: string,
+  questions: QuizQuestionDraft[],
+  token: string
+) =>
+  request<StrapiSingle<Quiz>>(`/api/quizzes/${documentId}`, {
+    token,
+    method: 'PUT',
+    body: { data: { Question: questions } },
+  }).then((r) => r.data);
+
+/**
+ * A new quiz gating one lesson. The quiz owns the `lesson` relation
+ * (`Lesson.quiz` is the `mappedBy` side), so one call does it.
+ */
+export const createLessonQuiz = (
+  lessonId: string,
+  questions: QuizQuestionDraft[],
+  token: string
+) =>
+  request<StrapiSingle<Quiz>>('/api/quizzes', {
+    token,
+    method: 'POST',
+    body: { data: { lesson: lessonId, Question: questions } },
+  }).then((r) => r.data);
+
+/** A new practice quiz. The quiz owns `parent_course` too, so again one call. */
+export const createPracticeQuiz = (
+  courseId: string,
+  questions: QuizQuestionDraft[],
+  token: string
+) =>
+  request<StrapiSingle<Quiz>>('/api/quizzes', {
+    token,
+    method: 'POST',
+    body: { data: { parent_course: courseId, Question: questions } },
+  }).then((r) => r.data);
+
+/**
+ * Set (or clear) a course's final quiz.
+ *
+ * A custom route because `Course.final_quiz` is the *owning* side of that
+ * relation: writing `course` on the quiz does nothing at all. The handler also
+ * demotes whatever quiz previously held the slot to a practice quiz, so nothing is
+ * ever left with no relation — such a quiz cannot be edited or deleted over REST,
+ * because the ownership policy can no longer resolve its course.
+ */
+export const setCourseFinalQuiz = (
+  courseId: string,
+  quizId: string | null,
+  token: string
+) =>
+  request<StrapiSingle<FinalQuizAssignment>>(`/api/courses/${courseId}/final-quiz`, {
+    token,
+    method: 'PUT',
+    body: { quiz: quizId },
+  }).then((r) => r.data);
+
+/**
+ * A new final quiz, in two calls for the reason above: the quiz is created under
+ * `parent_course` — the one course relation it owns, and the one `can-manage-quiz`
+ * checks to authorise the create — and then promoted, which clears `parent_course`
+ * server-side. Wrapped here so no page has to know about the seam.
+ */
+export const createFinalQuiz = async (
+  courseId: string,
+  questions: QuizQuestionDraft[],
+  token: string
+) => {
+  const quiz = await createPracticeQuiz(courseId, questions, token);
+  await setCourseFinalQuiz(courseId, quiz.documentId, token);
+  return quiz;
+};
+
+/* -------------------------------------------------------------------------- */
 /* Enrollment and results                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -340,3 +445,38 @@ export const publishBlog = (documentId: string, token: string) =>
 
 export const getPlatformStats = (token: string) =>
   request<StrapiSingle<PlatformStats>>('/api/admin/stats', { token }).then((r) => r.data);
+
+/**
+ * The account directory, plus the roles that may be assigned, in one response.
+ *
+ * Not `GET /api/users`: that needs `plugin::users-permissions.user.find`, and
+ * `?populate=role` additionally needs `role.find` — which also opens the endpoint
+ * listing every role with its full permission set. Granting either to read a
+ * dashboard list would be account enumeration, so this is a narrow admin-only
+ * endpoint instead.
+ */
+export const listUsers = (token: string, opts?: { role?: string; q?: string }) => {
+  const params = new URLSearchParams({ pageSize: '100' });
+
+  if (opts?.role) params.set('role', opts.role);
+  if (opts?.q) params.set('q', opts.q);
+
+  return request<StrapiSingle<AdminDirectory>>(`/api/admin/users?${params}`, { token }).then(
+    (r) => r.data
+  );
+};
+
+/**
+ * Assign a role, by role *type* rather than database id — the frontend never has
+ * to know the contents of `up_roles`.
+ *
+ * The server refuses to change the caller's own role: an admin demoting themselves
+ * would lose this very endpoint, and the last admin doing it would lock everyone
+ * out of role assignment entirely.
+ */
+export const setUserRole = (userId: number, roleType: string, token: string) =>
+  request<StrapiSingle<AdminUser>>(`/api/admin/users/${userId}/role`, {
+    token,
+    method: 'PUT',
+    body: { role: roleType },
+  }).then((r) => r.data);

@@ -162,14 +162,22 @@ const QUIZ_COURSE_POPULATE = {
 const courseOfQuiz = (quiz: any) =>
   quiz?.course ?? quiz?.parent_course ?? quiz?.lesson?.course ?? null;
 
-export const resolveQuizCourse = async (quizDocumentId: string) => {
+export const resolveQuizCourse = async (
+  quizDocumentId: string,
+  /**
+   * Grading reads the published quiz, which is what a student is answering. An
+   * author has to see what they are about to edit, so the authoring endpoints
+   * pass ANY_VERSION — see `quiz.manage`.
+   */
+  version: typeof PUBLISHED | typeof ANY_VERSION = PUBLISHED
+) => {
   const quiz = await docs('api::quiz.quiz').findOne({
     documentId: quizDocumentId,
     // correctOptionIndex is `private`, which only strips it from REST output —
     // the Document Service still returns it, which is what makes server-side
     // grading possible.
     populate: { Question: true, ...QUIZ_COURSE_POPULATE },
-    ...PUBLISHED,
+    ...version,
   });
 
   if (!quiz) {

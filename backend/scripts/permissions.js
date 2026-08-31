@@ -4,12 +4,12 @@
  * Grants the role permissions this LMS needs — `npm run permissions`.
  *
  * Why this exists as a script rather than a dashboard checklist: the custom
- * routes (quiz submit, lesson complete, course progress, blog publish, admin
- * stats) each create a *new* permission action, and a route with no permission
- * granted returns 403 no matter how correct the controller is. That is roughly
- * thirty checkboxes across five roles, which has to be repeated by hand on every
- * environment — including production — and is exactly the sort of step that gets
- * half-done.
+ * routes (quiz submit, quiz manage, lesson complete, course progress, blog
+ * publish, and the admin API) each create a *new* permission action, and a route
+ * with no permission granted returns 403 no matter how correct the controller is.
+ * That is roughly thirty checkboxes across five roles, which has to be repeated by
+ * hand on every environment — including production — and is exactly the sort of
+ * step that gets half-done.
  *
  * ADDITIVE ONLY. It never revokes a grant, so it cannot undo anything configured
  * in the dashboard; re-running it is a no-op once everything is present.
@@ -43,6 +43,12 @@ const MANAGE_CONTENT = [
   'api::quiz.quiz.create',
   'api::quiz.quiz.update',
   'api::quiz.quiz.delete',
+  // Reading a quiz *with* its answer key, so it can be edited rather than
+  // overwritten. Behind `can-manage-quiz`, the same policy as the writes above.
+  'api::quiz.quiz.manage',
+  // `Course.final_quiz` is the owning side of that relation, so the link is
+  // written from the course. Behind `can-manage-course`.
+  'api::course.course.setFinalQuiz',
 ];
 
 /**
@@ -137,7 +143,11 @@ const MATRIX = {
     'api::quiz-result.quiz-result.delete',
     'api::course.course.progress',
     'api::course.course.studentsProgress',
-    'api::course.course.stats',
+    // The admin-only API: platform counts, the account directory, and role
+    // assignment. Every route there also carries the `is-admin` policy.
+    'api::admin.admin.stats',
+    'api::admin.admin.users',
+    'api::admin.admin.setUserRole',
   ],
 };
 

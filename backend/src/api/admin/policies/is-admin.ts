@@ -1,10 +1,10 @@
 /**
  * is-admin
  *
- * Guards `/api/admin/stats`. The permission checkbox in the dashboard already
- * limits the route to the Admin role; this makes the restriction explicit in
+ * Guards every route in this API. The permission checkbox in the dashboard
+ * already limits them to the Admin role; this makes the restriction explicit in
  * code so an accidental tick on another role does not expose platform-wide
- * counts.
+ * counts, the account directory, or role assignment.
  */
 
 import { isAdmin, type AuthUser } from '../../../utils/roles';

@@ -4,15 +4,16 @@
 
 import { factories } from '@strapi/strapi';
 import type { Context } from 'koa';
-import { isAdmin } from '../../../utils/roles';
 import {
   ANY_VERSION,
   ENROLLMENT_STATUS,
   NO_LIMIT,
+  PUBLISHED,
   attachOwner,
   canManageCourse,
   computeCourseProgress,
   isEnrollmentActive,
+  resolveQuizCourse,
   scopeQueryToDocuments,
   uniqueSlug,
   withholdCourseContent,
@@ -298,58 +299,119 @@ export default factories.createCoreController('api::course.course', () => ({
   },
 
   /**
-   * GET /api/admin/stats
+   * PUT /api/courses/:documentId/final-quiz
    *
-   * Also guarded by the `is-admin` policy on the route. The check is repeated
-   * here so the handler is safe even if the route config is edited later.
+   * Body: `{ "quiz": "<documentId>" }`, or `{ "quiz": null }` to unset.
+   *
+   * This route exists because of which side owns the relation. `Course.final_quiz`
+   * is the `inversedBy` side, so the link has to be written from the *course* —
+   * setting `course` on the quiz does nothing at all. Rather than make every
+   * caller know that, the frontend creates a quiz under `parent_course` (which the
+   * quiz does own) and then promotes it here.
+   *
+   * A quiz leaving the final slot is demoted to a practice quiz of the same course
+   * rather than detached. A quiz with none of the three relations set is reachable
+   * by nobody: `can-manage-quiz` cannot resolve its course, so it can no longer be
+   * edited or even deleted over REST, and `submit` refuses to grade it.
+   *
+   * Guarded by `can-manage-course` on the route, so an instructor can only do this
+   * to their own course.
    */
-  async stats(ctx: Context) {
+  async setFinalQuiz(ctx: Context) {
     const { user } = ctx.state;
 
     if (!user) {
-      return ctx.unauthorized('You must be logged in to view platform statistics.');
+      return ctx.unauthorized('You must be logged in to set a final quiz.');
     }
 
-    if (!isAdmin(user)) {
-      return ctx.forbidden('Administrator access required.');
-    }
+    const { documentId } = ctx.params;
 
-    // Roles and users are not draft/publish content types, so these go through
-    // the query engine directly.
-    const roles = await strapi.db.query('plugin::users-permissions.role').findMany({
-      select: ['id', 'name', 'type'],
+    const course = await strapi.documents('api::course.course').findOne({
+      documentId,
+      populate: ['creator', 'instructors', 'final_quiz'],
+      ...ANY_VERSION,
     });
 
-    const usersByRole = await Promise.all(
-      roles.map(async (role: any) => ({
-        role: role.type,
-        name: role.name,
-        users: await strapi.db
-          .query('plugin::users-permissions.user')
-          .count({ where: { role: role.id } }),
-      }))
-    );
+    if (!course) {
+      return ctx.notFound('Course not found.');
+    }
 
-    // Counted with ANY_VERSION so each document counts once; counting published
-    // rows would undercount anything still in draft.
-    const [totalCourses, totalLessons, totalEnrollments, totalQuizzes, totalBlogs] =
-      await Promise.all([
-        strapi.documents('api::course.course').count({ ...ANY_VERSION }),
-        strapi.documents('api::lesson.lesson').count({ ...ANY_VERSION }),
-        strapi.documents('api::enrollment.enrollment').count({ ...ANY_VERSION }),
-        strapi.documents('api::quiz.quiz').count({ ...ANY_VERSION }),
-        strapi.documents('api::blog.blog').count({ ...ANY_VERSION }),
-      ]);
+    // Repeated from the route policy so the handler is safe on its own.
+    if (!canManageCourse(user, course)) {
+      return ctx.forbidden('You can only change the final quiz of a course you manage.');
+    }
+
+    const requested = (ctx.request.body as { quiz?: unknown } | undefined)?.quiz;
+
+    if (requested !== null && typeof requested !== 'string') {
+      return ctx.badRequest('Body must be { "quiz": "<documentId>" } or { "quiz": null }.');
+    }
+
+    const previous = (course as any).final_quiz?.documentId ?? null;
+    const next = requested === null || requested === '' ? null : requested;
+
+    if (next) {
+      const { quiz, course: attachedTo } = await resolveQuizCourse(next, ANY_VERSION);
+
+      if (!quiz) {
+        return ctx.notFound('Quiz not found.');
+      }
+
+      // A quiz belongs in one place. Silently stealing one from another course —
+      // or off a lesson it currently gates — would break that lesson's gate.
+      if (attachedTo && attachedTo.documentId !== documentId) {
+        return ctx.badRequest(
+          'That quiz belongs to another course. Create a new quiz for this one instead.'
+        );
+      }
+
+      if ((quiz as any).lesson) {
+        return ctx.badRequest(
+          'That quiz gates a lesson. Detach it from the lesson before making it the final quiz.'
+        );
+      }
+    }
+
+    // Set the course side first. Clearing `parent_course` before the final link
+    // exists would leave the quiz momentarily orphaned, and unrecoverable if the
+    // second write failed.
+    //
+    // All three writes are PUBLISHED, not ANY_VERSION: every reader of a course
+    // takes the published version — `getCourse` in the frontend, the catalog, the
+    // course page — so writing only the draft would set a final quiz that nothing
+    // outside the authoring screen could see. Publishing is safe here because the
+    // content API publishes a course on create and on every ordinary update, so a
+    // course in this app is never deliberately left in draft.
+    await strapi.documents('api::course.course').update({
+      documentId,
+      data: { final_quiz: next } as any,
+      ...PUBLISHED,
+    });
+
+    if (next) {
+      // Otherwise it stays listed as a practice quiz as well, and the course page
+      // would offer the same quiz twice.
+      await strapi.documents('api::quiz.quiz').update({
+        documentId: next,
+        data: { parent_course: null } as any,
+        ...PUBLISHED,
+      });
+    }
+
+    if (previous && previous !== next) {
+      await strapi.documents('api::quiz.quiz').update({
+        documentId: previous,
+        data: { parent_course: documentId } as any,
+        ...PUBLISHED,
+      });
+    }
 
     return {
       data: {
-        totalUsers: usersByRole.reduce((sum, entry) => sum + entry.users, 0),
-        usersByRole,
-        totalCourses,
-        totalLessons,
-        totalEnrollments,
-        totalQuizzes,
-        totalBlogs,
+        courseId: documentId,
+        finalQuizId: next,
+        /** Set when the quiz that used to hold the slot was demoted to practice. */
+        demotedToPractice: previous && previous !== next ? previous : null,
       },
     };
   },

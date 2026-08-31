@@ -9,14 +9,14 @@
  * manage. So a content manager sees this page for any course, an instructor only
  * for their own, and neither can talk the API into more than that.
  *
- * Two deliberate omissions:
+ * Two things this page does not do:
  *
  *   * **The slug is not editable.** It is the course's URL, and the API only ever
  *     fills it on create.
- *   * **Quiz questions are not written here.** This page attaches an existing quiz
- *     to a lesson; the questions and their answer keys live in the Strapi admin,
- *     where the answer key can be kept `private` and the repeatable-component
- *     editor does a far better job than a form in this app would.
+ *   * **Quiz questions are not written here either**, but they are no longer written
+ *     in the Strapi admin: every "quiz" link below opens
+ *     `courses/[id]/quiz`, which is the one screen allowed to read an answer key.
+ *     This page only decides *which* quiz is attached where.
  *
  * Form state is held as *overrides* — a field the author has not touched is absent
  * and reads straight from the loaded course — so a save can simply clear the
@@ -276,6 +276,18 @@ function CourseEdit() {
    */
   const quizById = new Map(quizzes.map((quiz) => [quiz.documentId, quiz]));
 
+  /**
+   * How many questions a quiz holds, resolved through `quizById` for the same
+   * reason: the copies hanging off the course populate carry no `Question`, so
+   * counting them directly always reads 0.
+   */
+  const questionCount = (quiz: Quiz | null | undefined): number =>
+    quiz ? (quizById.get(quiz.documentId)?.Question?.length ?? quiz.Question?.length ?? 0) : 0;
+
+  /** Where the question editor lives. One page, told what to edit by its query. */
+  const quizHref = (target: string) =>
+    `/dashboard/instructor/courses/${courseId}/quiz?${target}`;
+
   const titleValue = courseEdits.title ?? course.title;
   const descriptionValue = courseEdits.description ?? course.description ?? '';
   const coverValue = courseEdits.coverUrl ?? course.coverUrl ?? '';
@@ -396,12 +408,12 @@ function CourseEdit() {
         </select>
         <p className={`mt-1.5 ${muted}`}>
           {selectedQuiz && (selectedQuiz.Question?.length ?? 0) === 0
-            ? 'This quiz has no questions yet, so it will not gate the lesson. Add them in the Strapi admin.'
+            ? 'This quiz has no questions yet, so it will not gate the lesson. Save the lesson, then use its Quiz link to write them.'
             : selectedQuiz
               ? // The pass mark itself is not repeated here — it lives in one place on
                 // the server, and the lesson page reads it from the progress payload.
                 'Students must pass this quiz before they can complete the lesson or move to the next one.'
-              : 'A quiz belongs to one lesson at a time — picking one that is already attached moves it. Questions are written in the Strapi admin.'}
+              : 'This attaches a quiz that already exists, and a quiz belongs to one lesson at a time — picking one that is already attached moves it. To write a new one, save the lesson and use its Quiz link.'}
         </p>
       </div>
 
@@ -597,6 +609,12 @@ function CourseEdit() {
 
                       <div className="flex shrink-0 items-center gap-2">
                         {gates ? <Badge>Gated</Badge> : null}
+                        <Link
+                          href={quizHref(`lesson=${lesson.documentId}`)}
+                          className={btnSecondary}
+                        >
+                          {quiz ? 'Edit quiz' : 'Add quiz'}
+                        </Link>
                         <Link href={`/lessons/${lesson.documentId}`} className={btnSecondary}>
                           View
                         </Link>
@@ -633,18 +651,51 @@ function CourseEdit() {
 
         <Panel title="Quizzes">
           <p className={muted}>
-            Quiz <em>questions</em> and their answers are written in the Strapi admin —
-            the answer key is never sent to a browser, which is what makes grading on
-            the server trustworthy. Once a quiz exists there, attach it to a lesson
-            above, or set it as this course&apos;s final or practice quiz from the
-            admin.
+            A quiz belongs to one place at a time: it gates a lesson, ends the course,
+            or is optional practice. The lessons above own theirs; this panel covers
+            the other two. Questions and their answer keys are written in the app —
+            the key is stored <em>private</em>, so it never reaches a student&apos;s
+            browser and grading stays on the server.
           </p>
-          <p className={`mt-3 ${muted}`}>
-            {course.final_quiz ? 'A final quiz is set. ' : 'No final quiz is set. '}
-            {(course.practice_quizzes?.length ?? 0) === 0
-              ? 'No practice quizzes.'
-              : `${course.practice_quizzes?.length} practice quiz(zes).`}
-          </p>
+
+          <ul className="mt-4 space-y-3">
+            <li className={`${card} flex flex-wrap items-center justify-between gap-3`}>
+              <div>
+                <p className="font-medium">Final quiz</p>
+                <p className={muted}>
+                  {course.final_quiz
+                    ? `${questionCount(course.final_quiz)} question${questionCount(course.final_quiz) === 1 ? '' : 's'} · the latest score is recorded on each student’s transcript`
+                    : 'Not set. Students finish the course without a graded final.'}
+                </p>
+              </div>
+              <Link href={quizHref('kind=final')} className={btnSecondary}>
+                {course.final_quiz ? 'Edit' : 'Create'}
+              </Link>
+            </li>
+
+            {(course.practice_quizzes ?? []).map((practice, index) => (
+              <li
+                key={practice.documentId}
+                className={`${card} flex flex-wrap items-center justify-between gap-3`}
+              >
+                <div>
+                  <p className="font-medium">Practice quiz {index + 1}</p>
+                  <p className={muted}>
+                    {questionCount(practice)} question
+                    {questionCount(practice) === 1 ? '' : 's'} · scored on screen, nothing
+                    stored
+                  </p>
+                </div>
+                <Link href={quizHref(`quiz=${practice.documentId}`)} className={btnSecondary}>
+                  Edit
+                </Link>
+              </li>
+            ))}
+          </ul>
+
+          <Link href={quizHref('kind=practice')} className={`${btnSecondary} mt-4`}>
+            Add a practice quiz
+          </Link>
         </Panel>
       </div>
     </Page>

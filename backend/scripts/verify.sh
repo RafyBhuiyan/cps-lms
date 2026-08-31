@@ -61,6 +61,15 @@ post() {
     -H 'Content-Type: application/json' -d "$3"
 }
 
+# The PUT twin of `post`, for the handlers whose *body* is asserted rather than
+# their status — role assignment and the final-quiz link both report what they
+# actually stored, and reading that back is the only way to tell a write that
+# landed from one that was accepted and dropped.
+put() {
+  $CURL -X PUT "$API$1" ${2:+-H "Authorization: Bearer $2"} \
+    -H 'Content-Type: application/json' -d "$3"
+}
+
 # Counts distinct documentIds in a response. `grep -c` counts matching *lines*
 # and the body is a single line, so it would report 1 for any non-empty response.
 rows() { get "$1" "${2:-}" | grep -oP '"documentId":"\K[^"]+' | sort -u | wc -l; }
@@ -202,16 +211,49 @@ if [ -z "${S1_USER_ID:-}" ]; then
   exit 1
 fi
 
-# instructor2 registers into the default role; it needs the instructor role to
-# test instructor-vs-instructor ownership. Read through the admin token, because
-# `?populate=role` on /users/me is rejected for a caller whose own role lacks
-# `find` on the user content type.
-I2_ROLE=$(get '/api/users?filters[email]=instructor2@demo.test&populate=role' "$T_ADMIN" |
-  grep -oP '"type":"\K[^"]+' | head -1 || true)
+# instructor2 registers into the default role; it needs the instructor role for the
+# instructor-vs-instructor ownership checks to mean anything. Until role assignment
+# moved into the app this was a manual step in Settings -> Users & Permissions ->
+# Users, and a run that skipped it passed *vacuously*: every "another instructor
+# cannot ..." assertion below expects 403, and a student is 403 too. So the suite
+# now assigns the role itself, through the same endpoint the admin dashboard uses,
+# and refuses to continue without it.
+#
+# The numeric ids come from /api/users/me for the same reason S1_USER_ID does — see
+# the note above it. The admin's own id is needed for the one assertion that has to
+# name the caller: an admin may not change their own role.
+I2_USER_ID=$(token_user_id "$T_I2")
+ADMIN_USER_ID=$(token_user_id "$T_ADMIN")
+if [ -z "${I2_USER_ID:-}" ] || [ -z "${ADMIN_USER_ID:-}" ]; then
+  echo "Could not read the numeric ids of instructor2@demo.test / admin@demo.test." >&2
+  exit 1
+fi
+
+# Read through /api/admin/users rather than /api/users?populate=role: the latter
+# needs `find` on the user type *and* on the role type, and the second grant also
+# opens /api/users-permissions/roles — every role with its full permission set.
+#
+# The email is confirmed present before the role is read, because on an empty match
+# the first `"type"` in the payload belongs to the assignable-roles list that ships
+# alongside the users, and that would report someone else's role as instructor2's.
+role_of() {
+  local body
+  body=$(get "/api/admin/users?q=$1" "$T_ADMIN")
+  printf '%s' "$body" | grep -q "\"email\":\"$1\"" || return 0
+  printf '%s' "$body" | grep -oP '"type":"\K[^"]+' | head -1
+}
+
+I2_ROLE=$(role_of instructor2@demo.test || true)
 if [ "${I2_ROLE:-}" != "instructor" ]; then
-  echo "NOTE: instructor2@demo.test is not in the instructor role (found '${I2_ROLE:-unknown}')."
-  echo "      Assign it in Settings -> Users & Permissions -> Users, or the"
-  echo "      instructor-vs-instructor checks below will not mean anything."
+  echo "  instructor2@demo.test is in '${I2_ROLE:-no role}' — assigning the instructor role."
+  status PUT "/api/admin/users/$I2_USER_ID/role" "$T_ADMIN" '{"role":"instructor"}' > /dev/null
+  I2_ROLE=$(role_of instructor2@demo.test || true)
+fi
+if [ "${I2_ROLE:-}" != "instructor" ]; then
+  echo "instructor2@demo.test is still not an instructor (found '${I2_ROLE:-no role}')." >&2
+  echo "Run 'npm run permissions' in backend/ so the admin role holds" >&2
+  echo "api::admin.admin.users and api::admin.admin.setUserRole, then re-run." >&2
+  exit 1
 fi
 
 # --------------------------------------------------------------------------- #
@@ -243,6 +285,28 @@ normalize_draft_blog() {
 }
 
 normalize_draft_blog
+
+# student2 is the account every "owns nothing" assertion leans on: enrolled nowhere,
+# no progress, no results. That is a *precondition*, and nothing established it. This
+# suite cleans up after itself, but requesting enrolment as student2 once in the
+# browser leaves a row that then survives every run afterwards — and one stray
+# approved enrollment turns five assertions into failures that look like leaks and are
+# not: an enrolled student may legitimately read the questions of a quiz in their own
+# course, so the redaction checks correctly report content reaching them.
+#
+# Removed loudly rather than silently. Deleting somebody's rows is not something a
+# verification script should do without saying so.
+normalize_student2() {
+  local kind stray
+  for kind in enrollments lesson-progresses quiz-results; do
+    for stray in $(ids "/api/$kind?pagination[pageSize]=100" "$T_S2"); do
+      echo "  removing a stray $kind row left on student2@demo.test ($stray)"
+      status DELETE "/api/$kind/$stray" "$T_ADMIN" > /dev/null
+    done
+  done
+}
+
+normalize_student2
 
 PUBLISHED_BLOG=$(ids '/api/blogs?filters[currentStatus]=published&fields[0]=title' "$T_ADMIN" | head -1)
 DRAFT_BLOG=$(ids '/api/blogs?filters[currentStatus]=draft&fields[0]=title' "$T_ADMIN" | head -1)
@@ -300,6 +364,39 @@ check "questions still returned to the student" 4 \
   "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_S1" | grep -o '"questionText"' | wc -l)"
 check "options still returned to the student" 4 \
   "$(get "/api/quizzes/$FINAL_QUIZ?populate=Question" "$T_S1" | grep -o '"options"' | wc -l)"
+
+# --------------------------------------------------------------------------- #
+echo
+echo "=== except to whoever may rewrite it ==="
+# The one exception to the section above, and the reason the in-app quiz editor can
+# exist at all: an author opening a saved quiz has to see which option is marked, or
+# every field would render blank and the first save would wipe the key.
+#
+# So `GET /quizzes/:id/manage` returns it — behind `can-manage-quiz`, the same policy
+# that guards the writes, and assembling its payload field by field rather than
+# spreading the document, because this is the one place the key leaves the server.
+MANAGED=$(get "/api/quizzes/$FINAL_QUIZ/manage" "$T_ADMIN")
+check "an admin reads the key back" 4 \
+  "$(printf '%s' "$MANAGED" | grep -o correctOptionIndex | wc -l)"
+# Not merely that a key came back, but that it is the *same* key the grader uses:
+# these are the four answers that score 100 further down.
+check "and it is the key grading scores against" 0121 \
+  "$(printf '%s' "$MANAGED" | grep -oP '"correctOptionIndex":\K[0-9]+' | tr -d '\n')"
+# A quiz has no type column, so the editor titles itself from the relation that is
+# set. Getting this wrong would offer a final quiz under a lesson's heading.
+check "and it says which kind of quiz this is" '"isFinal":true' \
+  "$(printf '%s' "$MANAGED" | grep -o '"isFinal":true')"
+check "the course's own instructor reads it too" 4 \
+  "$(get "/api/quizzes/$FINAL_QUIZ/manage" "$T_I1" | grep -o correctOptionIndex | wc -l)"
+check "and a content manager, who may author anywhere" 4 \
+  "$(get "/api/quizzes/$FINAL_QUIZ/manage" "$T_CM" | grep -o correctOptionIndex | wc -l)"
+check "an instructor who does not own the course cannot" 403 \
+  "$(status GET "/api/quizzes/$FINAL_QUIZ/manage" "$T_I2")"
+# The student holds quiz.find and quiz.findOne, so this has to be refused by the
+# separate `manage` action rather than by quiz permissions in general.
+check "an enrolled student cannot" 403 \
+  "$(status GET "/api/quizzes/$FINAL_QUIZ/manage" "$T_S1")"
+check "nor an anonymous caller" 403 "$(status GET "/api/quizzes/$FINAL_QUIZ/manage")"
 
 # --------------------------------------------------------------------------- #
 echo
@@ -560,6 +657,86 @@ check "a student does not" 403 \
 check "an admin reads platform stats" 200 "$(status GET '/api/admin/stats' "$T_ADMIN")"
 check "an instructor does not" 403 "$(status GET '/api/admin/stats' "$T_I1")"
 check "a student does not" 403 "$(status GET '/api/admin/stats' "$T_S1")"
+# Content managers author content; they do not report on accounts.
+check "nor a content manager" 403 "$(status GET '/api/admin/stats' "$T_CM")"
+check "nor an anonymous caller" 403 "$(status GET '/api/admin/stats')"
+
+echo
+echo "=== the admin assigns roles from the app, not the Strapi panel ==="
+check "an admin reads the account directory" 200 "$(status GET '/api/admin/users' "$T_ADMIN")"
+check "a content manager does not" 403 "$(status GET '/api/admin/users' "$T_CM")"
+check "an instructor does not" 403 "$(status GET '/api/admin/users' "$T_I1")"
+check "a student does not" 403 "$(status GET '/api/admin/users' "$T_S1")"
+check "nor an anonymous caller" 403 "$(status GET '/api/admin/users')"
+
+DIRECTORY=$(get '/api/admin/users' "$T_ADMIN")
+# `strapi.db.query` bypasses the REST sanitizers, so the controller names its
+# columns explicitly. This is the assertion that catches a `select` widened by
+# accident: the user type carries all three of these.
+check "no credential fields ride along" 0 \
+  "$(printf '%s' "$DIRECTORY" | grep -oE '"(password|resetPasswordToken|confirmationToken)"' | wc -l)"
+check "the four assignable roles come with it" 4 \
+  "$(printf '%s' "$DIRECTORY" |
+     grep -oP '"type":"\K(authenticated|instructor|content_manager|admin)' | sort -u | wc -l)"
+# `public` is a real row in up_roles, and a user moved into it can no longer log in
+# as anyone — so the endpoint never offers it and `setUserRole` refuses it below.
+check "and the public role is not one of them" 0 \
+  "$(printf '%s' "$DIRECTORY" | grep -o '"type":"public"' | wc -l)"
+
+ADMINS_ONLY=$(get '/api/admin/users?role=admin' "$T_ADMIN")
+check "the role filter keeps the admins" 1 \
+  "$(printf '%s' "$ADMINS_ONLY" | grep -o '"email":"admin@demo.test"' | wc -l)"
+check "and drops everyone else" 0 \
+  "$(printf '%s' "$ADMINS_ONLY" | grep -o '"email":"student@demo.test"' | wc -l)"
+check "search narrows the directory to one account" 1 \
+  "$(get '/api/admin/users?q=instructor2@demo.test' "$T_ADMIN" | grep -o '"email":"[^"]*"' | wc -l)"
+
+# instructor2 is the account this round trip moves, and it ends where it started
+# because the ownership checks further down need it to be an instructor. Demoted
+# first and promoted back, never the other way about: a failed restore then shows up
+# as a FAIL right here, instead of quietly handing a content manager's reach to the
+# token that is supposed to be refused two hundred lines later.
+DEMOTED=$(put "/api/admin/users/$I2_USER_ID/role" "$T_ADMIN" '{"role":"authenticated"}')
+check "an admin can change someone's role" authenticated \
+  "$(printf '%s' "$DEMOTED" | grep -oP '"type":"\K[^"]+')"
+# Re-read, because the response could be an echo of the payload rather than what
+# the join table now says.
+check "and the change is stored, not echoed" authenticated "$(role_of instructor2@demo.test)"
+PROMOTED=$(put "/api/admin/users/$I2_USER_ID/role" "$T_ADMIN" '{"role":"instructor"}')
+check "and promote them again" instructor \
+  "$(printf '%s' "$PROMOTED" | grep -oP '"type":"\K[^"]+')"
+check "back to the role the checks below need" instructor "$(role_of instructor2@demo.test)"
+
+check "an unknown role type is refused" 400 \
+  "$(status PUT "/api/admin/users/$I2_USER_ID/role" "$T_ADMIN" '{"role":"superuser"}')"
+check "so is public, which exists but is not assignable" 400 \
+  "$(status PUT "/api/admin/users/$I2_USER_ID/role" "$T_ADMIN" '{"role":"public"}')"
+check "and a body naming no role at all" 400 \
+  "$(status PUT "/api/admin/users/$I2_USER_ID/role" "$T_ADMIN" '{}')"
+check "an id that is not a number is refused" 400 \
+  "$(status PUT '/api/admin/users/nobody/role' "$T_ADMIN" '{"role":"instructor"}')"
+check "and one that names nobody -> 404" 404 \
+  "$(status PUT '/api/admin/users/99999999/role' "$T_ADMIN" '{"role":"instructor"}')"
+# The check that stops the platform locking itself out. Role assignment lives behind
+# this endpoint and nowhere else in the app, so an admin who demotes themselves — the
+# only admin especially — has no way back in short of the Strapi panel.
+check "an admin cannot change their own role" 400 \
+  "$(status PUT "/api/admin/users/$ADMIN_USER_ID/role" "$T_ADMIN" '{"role":"authenticated"}')"
+check "a content manager cannot assign roles" 403 \
+  "$(status PUT "/api/admin/users/$I2_USER_ID/role" "$T_CM" '{"role":"admin"}')"
+check "nor an instructor" 403 \
+  "$(status PUT "/api/admin/users/$I2_USER_ID/role" "$T_I1" '{"role":"admin"}')"
+check "nor a student promoting themselves" 403 \
+  "$(status PUT "/api/admin/users/$S1_USER_ID/role" "$T_S1" '{"role":"admin"}')"
+check "nor an anonymous caller" 403 \
+  "$(status PUT "/api/admin/users/$S1_USER_ID/role" '' '{"role":"admin"}')"
+# Refusing with the right status is not the same as refusing to write. Every attempt
+# above named a real account with a real role; this is what proves none of them
+# landed anyway.
+check "and none of those refusals moved anyone" authenticated \
+  "$(role_of student@demo.test)"
+check "instructor2 included" instructor "$(role_of instructor2@demo.test)"
+check "the admin least of all" admin "$(role_of admin@demo.test)"
 
 echo
 echo "=== what the frontend reads to render itself ==="
@@ -803,6 +980,42 @@ check "two attempts leave one result row" 1 \
   "$(rows '/api/quiz-results?pagination[pageSize]=100' "$T_S2")"
 
 echo
+echo "=== rewriting a quiz rewrites what the grader marks against ==="
+# The whole point of the in-app editor: an author loads a quiz through `manage`,
+# changes the questions and the key, and saves through the ordinary PUT — because
+# `private` is output-only in Strapi 5, so `correctOptionIndex` was always writable
+# and only ever unreadable.
+#
+# Asserted end to end rather than by reading the row back, because a key that is
+# stored but not the one `submit` consults would pass every read-side check here.
+check "the lesson's own instructor can replace the questions" 200 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I2" \
+    '{"data":{"Question":[{"questionText":"Capital of France?","options":["Berlin","Paris","Rome"],"correctOptionIndex":1},{"questionText":"2+2?","options":["3","4"],"correctOptionIndex":1}]}}')"
+check "and reads the new key back through manage" 11 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID/manage" "$T_I2" | grep -oP '"correctOptionIndex":\K[0-9]+' | tr -d '\n')"
+# A key written over REST is stripped on the way out exactly like a seeded one. The
+# student here is enrolled and approved, so this is the strongest form of the claim:
+# they may read the paper and still not the answers.
+check "while the student taking it still cannot" 0 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID?populate=Question" "$T_S2" | grep -c correctOptionIndex || true)"
+check "but does get both questions" 2 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID?populate=Question" "$T_S2" | grep -o '"questionText"' | wc -l)"
+check "the grader marks against the key just written" 100 \
+  "$(post "/api/quizzes/$SMOKE_QUIZ_ID/submit" "$T_S2" '{"answers":[1,1]}' | num score)"
+# The answers that used to be right — one question, key 1 — now score half, which is
+# what proves the old key is gone rather than merely overwritten in the response.
+check "and the previous key no longer passes" 50 \
+  "$(post "/api/quizzes/$SMOKE_QUIZ_ID/submit" "$T_S2" '{"answers":[0,1]}' | num score)"
+check "an instructor who does not own the lesson cannot rewrite it" 403 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I1" \
+    '{"data":{"Question":[{"questionText":"Whose quiz?","options":["mine","yours"],"correctOptionIndex":0}]}}')"
+check "and a student cannot rewrite it at all" 403 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_S2" \
+    '{"data":{"Question":[{"questionText":"2+2?","options":["3","4"],"correctOptionIndex":0}]}}')"
+check "so the key survived both attempts" 11 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID/manage" "$T_I2" | grep -oP '"correctOptionIndex":\K[0-9]+' | tr -d '\n')"
+
+echo
 echo "=== a declined request is final until staff reopen it ==="
 check "the course's instructor can decline" 200 \
   "$(status POST "/api/enrollments/$SMOKE_ENROL_ID/reject" "$T_I2" '{}')"
@@ -837,6 +1050,153 @@ check "and so can an admin" 200 \
   "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_ADMIN" '{"data":{}}')"
 
 echo
+echo "=== a malformed question set is refused before it is stored ==="
+# `options` is a json column and `correctOptionIndex` a plain integer, so the schema
+# validates neither the shape of one nor the range of the other. A quiz whose key
+# points past its own options is one nobody can pass, with no error anywhere: the
+# grader compares an answer against an index that does not exist, marks it wrong, and
+# the student is told they failed. So the controller checks the shape on the way in.
+for probe in \
+  'no question text:{"questionText":"   ","options":["3","4"],"correctOptionIndex":0}' \
+  'a single option:{"questionText":"2+2?","options":["4"],"correctOptionIndex":0}' \
+  'a blank option:{"questionText":"2+2?","options":["4",""],"correctOptionIndex":0}' \
+  'an option that is not text:{"questionText":"2+2?","options":["4",7],"correctOptionIndex":0}' \
+  'options that are not a list:{"questionText":"2+2?","options":"3,4","correctOptionIndex":0}' \
+  'a key past the last option:{"questionText":"2+2?","options":["3","4"],"correctOptionIndex":2}' \
+  'a negative key:{"questionText":"2+2?","options":["3","4"],"correctOptionIndex":-1}' \
+  'a fractional key:{"questionText":"2+2?","options":["3","4"],"correctOptionIndex":0.5}' \
+  'no key at all:{"questionText":"2+2?","options":["3","4"]}' \
+  ; do
+  label=${probe%%:*}
+  body=${probe#*:}
+  check "creating a quiz with $label" 400 \
+    "$(status POST '/api/quizzes' "$T_I2" \
+      "{\"data\":{\"parent_course\":\"$SMOKE_COURSE_ID\",\"Question\":[$body]}}")"
+  check "and rewriting one with it" 400 \
+    "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I2" "{\"data\":{\"Question\":[$body]}}")"
+done
+
+# A 400 is only half the claim; the other half is that nothing was written anyway.
+check "so nothing was created by any of them" 0 \
+  "$(rows "/api/quizzes?filters[parent_course][documentId]=$SMOKE_COURSE_ID" "$T_ADMIN")"
+check "and the question set already there survived" 11 \
+  "$(get "/api/quizzes/$SMOKE_QUIZ_ID/manage" "$T_I2" | grep -oP '"correctOptionIndex":\K[0-9]+' | tr -d '\n')"
+# The validator only fires when the payload carries `Question`. The course editor
+# attaches and detaches quizzes with relation-only writes, and refusing those for
+# "having no questions" would break the attach dropdown.
+check "but a relation-only write is not judged on its questions" 200 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I2" "{\"data\":{\"lesson\":\"$SMOKE_LESSON_ID\"}}")"
+# Emptying a quiz is a legitimate edit, so an empty list is accepted where a
+# malformed one is not. The editor asks for at least one question; the API does not.
+check "and an empty question set is accepted" 200 \
+  "$(status PUT "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I2" '{"data":{"Question":[]}}')"
+
+echo
+echo "=== promoting a quiz to the final moves it rather than copying it ==="
+# `Course.final_quiz` is the owning side of that relation, so the link can only be
+# written from the course — setting `quiz.course` from the quiz side silently does
+# nothing at all. PUT /courses/:id/final-quiz exists so the frontend never has to
+# know that, and it is also where the demotion below happens.
+#
+# A quiz has no type column: which relation is set is what makes it final, practice
+# or a lesson gate, so the kind is read back through `manage` rather than inferred.
+# Every match is reported, not the first one, because a quiz left on two relations at
+# once is exactly the bug being checked for.
+kind_of() {
+  get "/api/quizzes/$1/manage" "$T_ADMIN" |
+    grep -oP '"is(Final|Lesson|Practice)":true' | tr -d '"' | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# The course exactly as `getCourse` in the frontend asks for it — a plain read, so
+# the *published* version, which is the whole point: the authoring endpoint has to
+# write where readers look.
+course_view() {
+  get "/api/courses/$SMOKE_COURSE_ID?populate[final_quiz]=true&populate[practice_quizzes]=true&fields[0]=title" \
+    "$T_I2"
+}
+
+# The final quiz's documentId out of that, or empty when the slot is clear. Scoped to
+# the `final_quiz` object rather than taking the first documentId in the body, which
+# is the course's own. Safe as a flat match because a populated relation with no
+# populate of its own carries no nested object.
+final_quiz_of() {
+  printf '%s' "$1" | grep -oP '"final_quiz":\{[^}]*\}' | grep -oP '"documentId":"\K[^"]+'
+}
+
+new_practice() {
+  post '/api/quizzes' "$T_I2" \
+    "{\"data\":{\"parent_course\":\"$SMOKE_COURSE_ID\",\"Question\":[{\"questionText\":\"$1\",\"options\":[\"a\",\"b\"],\"correctOptionIndex\":0}]}}" |
+    grep -oP '"documentId":"\K[^"]+' | head -1
+}
+
+SMOKE_P1=$(new_practice 'Practice one?')
+SMOKE_P2=$(new_practice 'Practice two?')
+check "an instructor can add a practice quiz to their course" ok "${SMOKE_P1:+ok}"
+check "and a second one" ok "${SMOKE_P2:+ok}"
+check "a practice quiz starts as practice" isPractice:true "$(kind_of "$SMOKE_P1")"
+
+check "another instructor cannot set this course's final quiz" 403 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I1" "{\"quiz\":\"$SMOKE_P1\"}")"
+check "nor a student enrolled in it" 403 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_S2" "{\"quiz\":\"$SMOKE_P1\"}")"
+check "nor an anonymous caller" 403 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" '' "{\"quiz\":\"$SMOKE_P1\"}")"
+check "and the quiz is untouched by those attempts" isPractice:true "$(kind_of "$SMOKE_P1")"
+
+PROMOTED_QUIZ=$(put "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I2" "{\"quiz\":\"$SMOKE_P1\"}")
+check "the course's own instructor can" "$SMOKE_P1" \
+  "$(printf '%s' "$PROMOTED_QUIZ" | grep -oP '"finalQuizId":"\K[^"]+')"
+# The failure this rules out is `isFinal:true isPractice:true`: a quiz left on both
+# relations is offered twice on the course page and graded under whichever one
+# resolves first.
+check "and it is the final quiz only" isFinal:true "$(kind_of "$SMOKE_P1")"
+# Read back through the *published* version, which is what every reader of a course
+# takes — `getCourse` in the frontend, the catalog, the course page. A handler that
+# wrote only the draft would pass `kind_of` above and still set a final quiz that
+# nothing outside the authoring screen could see.
+check "the published course reports it as its final" "$SMOKE_P1" \
+  "$(final_quiz_of "$(course_view)")"
+check "and stops listing it as a practice quiz" 0 \
+  "$(rows "/api/quizzes?filters[parent_course][documentId]=$SMOKE_COURSE_ID&filters[documentId]=$SMOKE_P1" "$T_I2")"
+
+REPLACED=$(put "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_ADMIN" "{\"quiz\":\"$SMOKE_P2\"}")
+check "an admin can replace it" "$SMOKE_P2" \
+  "$(printf '%s' "$REPLACED" | grep -oP '"finalQuizId":"\K[^"]+')"
+check "and the response names the quiz it displaced" "$SMOKE_P1" \
+  "$(printf '%s' "$REPLACED" | grep -oP '"demotedToPractice":"\K[^"]+')"
+check "the published course reports the replacement" "$SMOKE_P2" \
+  "$(final_quiz_of "$(course_view)")"
+# The displaced quiz has to land somewhere. With none of the three relations set it
+# resolves to no course at all, which makes it uneditable and undeletable over REST
+# and ungradeable — an orphan nobody can reach even to clean up.
+check "so it is a practice quiz again, not an orphan" isPractice:true "$(kind_of "$SMOKE_P1")"
+check "and the course lists it as one" 1 \
+  "$(rows "/api/quizzes?filters[parent_course][documentId]=$SMOKE_COURSE_ID&filters[documentId]=$SMOKE_P1" "$T_I2")"
+
+CLEARED=$(put "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I2" '{"quiz":null}')
+check "the final quiz can be unset" '"finalQuizId":null' \
+  "$(printf '%s' "$CLEARED" | grep -o '"finalQuizId":null')"
+check "and unsetting demotes rather than orphans" isPractice:true "$(kind_of "$SMOKE_P2")"
+check "the course lists that one as practice too" 1 \
+  "$(rows "/api/quizzes?filters[parent_course][documentId]=$SMOKE_COURSE_ID&filters[documentId]=$SMOKE_P2" "$T_I2")"
+check "leaving the published course with no final quiz" '' "$(final_quiz_of "$(course_view)")"
+
+# A quiz belongs in one place. Stealing one off the lesson it gates would break that
+# gate silently, and taking one from another course would break that course.
+check "a quiz that gates a lesson cannot also be the final" 400 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I2" "{\"quiz\":\"$SMOKE_QUIZ_ID\"}")"
+check "nor can one belonging to another course" 400 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I2" "{\"quiz\":\"$PRACTICE_QUIZ\"}")"
+check "a quiz that does not exist -> 404" 404 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I2" '{"quiz":"nosuchquiz"}')"
+check "a body naming neither a quiz nor null -> 400" 400 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I2" '{"quiz":7}')"
+check "and an empty body -> 400" 400 \
+  "$(status PUT "/api/courses/$SMOKE_COURSE_ID/final-quiz" "$T_I2" '{}')"
+check "the seeded course kept its own lesson gate" isLesson:true "$(kind_of "$SMOKE_QUIZ_ID")"
+check "and its practice quiz stayed a practice quiz" isPractice:true "$(kind_of "$PRACTICE_QUIZ")"
+
+echo
 # Cleaned up in dependency order — the rows that point at the course before the
 # course itself, so nothing is left pointing at something that no longer exists.
 # Each delete is its own assertion: a cleanup that silently fails would surface as
@@ -859,6 +1219,14 @@ for created in $(ids "/api/enrollments?filters[course][documentId]=$SMOKE_COURSE
 done
 check "the smoke quiz is cleaned up" 204 \
   "$(status DELETE "/api/quizzes/$SMOKE_QUIZ_ID" "$T_I2")"
+# The two practice quizzes go before the course as well. Both are reachable only
+# through `parent_course`, so deleting the course first would leave them resolving to
+# nothing — the orphan state the promotion checks above exist to prevent, created by
+# the cleanup instead.
+check "the first practice quiz is cleaned up" 204 \
+  "$(status DELETE "/api/quizzes/$SMOKE_P1" "$T_I2")"
+check "the second practice quiz is cleaned up" 204 \
+  "$(status DELETE "/api/quizzes/$SMOKE_P2" "$T_I2")"
 check "the smoke lesson is cleaned up" 204 \
   "$(status DELETE "/api/lessons/$SMOKE_LESSON_ID" "$T_I2")"
 check "the smoke course is cleaned up" 204 \

@@ -10,9 +10,9 @@
  *
  * Creating a course is the only write an instructor has here; everything else about
  * it — its fields, its lessons, and which quiz gates which lesson — is edited on the
- * course's own edit page. Quiz *questions* are still written in the Strapi admin,
- * because the answer key must stay `private` and the repeatable-component editor
- * there handles it better than a form in this app would.
+ * course's own edit page, and the quiz *questions* on the editor that page links to.
+ * An instructor reaches only their own courses either way: the ownership policies
+ * behind those pages resolve the course a request names and refuse the rest.
  */
 
 import Link from 'next/link';

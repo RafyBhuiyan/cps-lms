@@ -272,3 +272,76 @@ export type PlatformStats = {
   totalQuizzes: number;
   totalBlogs: number;
 };
+
+/**
+ * One account, as the admin dashboard sees it. Deliberately narrow — the endpoint
+ * that returns it names its columns explicitly, so nothing else about a user is
+ * available here even by accident.
+ */
+export type AdminUser = {
+  /** The numeric id, which is what `setUserRole` addresses. Users have no documentId in this payload. */
+  id: number;
+  username: string | null;
+  email: string | null;
+  confirmed: boolean;
+  blocked: boolean;
+  createdAt: string | null;
+  role: { name: string | null; type: RoleType | string | null } | null;
+};
+
+/**
+ * `GET /api/admin/users` — accounts and the assignable roles together, so the
+ * dashboard can render its role selects without a second request. `total` is the
+ * unpaginated count, so a truncated page can say so.
+ */
+export type AdminDirectory = {
+  users: AdminUser[];
+  roles: { id: number; name: string; type: RoleType | string }[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
+/* -------------------------------------------------------------------------- */
+/* Quiz authoring                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A question as an author writes it — including the answer key, which is the whole
+ * point. `correctOptionIndex` is `private` in the schema, so it is *writable* but
+ * unreadable: it comes back only from `GET /api/quizzes/:id/manage`, never from an
+ * ordinary read.
+ */
+export type QuizQuestionDraft = {
+  questionText: string;
+  options: string[];
+  /** An index into `options`. Null only for a legacy question with no key recorded. */
+  correctOptionIndex: number | null;
+};
+
+/**
+ * `GET /api/quizzes/:id/manage` — a quiz with its answer key, for someone allowed
+ * to change it. The three booleans say which kind it is; a quiz carries no type
+ * flag of its own, only the relation that happens to be set.
+ */
+export type ManagedQuiz = {
+  documentId: string;
+  questions: QuizQuestionDraft[];
+  course: { documentId: string; title: string | null } | null;
+  lesson: { documentId: string; title: string | null } | null;
+  isFinal: boolean;
+  isLesson: boolean;
+  isPractice: boolean;
+};
+
+/** `PUT /api/courses/:id/final-quiz` */
+export type FinalQuizAssignment = {
+  courseId: string;
+  finalQuizId: string | null;
+  /**
+   * The quiz that used to hold the slot, if one did. It is demoted to a practice
+   * quiz rather than detached — a quiz with no relation at all cannot be reached,
+   * edited or deleted over REST.
+   */
+  demotedToPractice: string | null;
+};

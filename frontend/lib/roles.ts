@@ -34,14 +34,24 @@ export const isAdmin = (user: Profile | null) => roleTypeOf(user) === ROLE.ADMIN
 export const canAuthorContent = (user: Profile | null) =>
   isInstructor(user) || isContentManager(user) || isAdmin(user);
 
-/** Human-readable label for the badge in the nav. */
-export const roleLabel = (user: Profile | null): string => {
-  if (isStudent(user)) return 'Student';
-  if (isInstructor(user)) return 'Instructor';
-  if (isContentManager(user)) return 'Content manager';
-  if (isAdmin(user)) return 'Admin';
-  return user?.role?.name ?? 'Unknown role';
+/**
+ * Human-readable label for a role `type`.
+ *
+ * Separate from `roleLabel` because the admin dashboard labels *other* accounts,
+ * which arrive as a bare type rather than as a `Profile`. Both go through this so
+ * the two can never disagree.
+ */
+export const roleLabelOf = (type: string | null | undefined): string | null => {
+  if (type === ROLE.STUDENT || type === 'student') return 'Student';
+  if (type === ROLE.INSTRUCTOR) return 'Instructor';
+  if (type === ROLE.CONTENT_MANAGER) return 'Content manager';
+  if (type === ROLE.ADMIN) return 'Admin';
+  return null;
 };
+
+/** Human-readable label for the badge in the nav. */
+export const roleLabel = (user: Profile | null): string =>
+  roleLabelOf(roleTypeOf(user)) ?? user?.role?.name ?? 'Unknown role';
 
 /** Where signing in lands you. */
 export const homeFor = (user: Profile | null): string => {
