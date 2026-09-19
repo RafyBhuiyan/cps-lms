@@ -22,5 +22,20 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Use the Geist fonts variables loaded in layout.tsx */
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background-color: #e4e4e7;
+  color: #18181b;
+}
+
+@media (prefers-color-scheme: dark) {
+  ::selection {
+    background-color: #3f3f46;
+    color: #f4f4f5;
+  }
 }
