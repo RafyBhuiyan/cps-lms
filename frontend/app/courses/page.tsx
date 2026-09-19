@@ -36,17 +36,20 @@ export default function CoursesPage() {
         courses.length === 0 ? (
           <Empty>No courses have been published yet.</Empty>
         ) : (
-          <ul className="grid gap-4 sm:grid-cols-2">
+          <ul className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {courses.map((course) => (
-              <li key={course.documentId}>
+              <li key={course.documentId} className="group">
                 <Link
                   href={`/courses/${course.documentId}`}
-                  className={`${card} block h-full transition-colors hover:border-black/25 dark:hover:border-white/30`}
+                  className={`${card} flex h-full flex-col transition-all hover:-translate-y-1 hover:shadow-lg hover:border-black/10 dark:hover:border-white/20`}
                 >
-                  <h2 className="font-semibold">{course.title}</h2>
+                  <h2 className="text-xl font-bold tracking-tight text-zinc-900 group-hover:text-zinc-700 dark:text-zinc-100 dark:group-hover:text-zinc-300 transition-colors">{course.title}</h2>
                   {course.description ? (
-                    <p className={`mt-2 line-clamp-3 ${muted}`}>{course.description}</p>
+                    <p className={`mt-3 line-clamp-3 flex-1 ${muted}`}>{course.description}</p>
                   ) : null}
+                  <div className="mt-6 flex items-center text-sm font-medium text-zinc-900 dark:text-zinc-100 opacity-0 transition-opacity group-hover:opacity-100">
+                    View Course <span className="ml-2">→</span>
+                  </div>
                 </Link>
               </li>
             ))}

@@ -10,19 +10,19 @@ import type { ReactNode } from 'react';
 /* Class strings, exported so forms and links can look like the buttons. */
 
 export const btn =
-  'inline-flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition-all hover:scale-[1.02] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100';
 
-export const btnPrimary = `${btn} bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white`;
+export const btnPrimary = `${btn} bg-zinc-900 text-white shadow-md hover:bg-zinc-800 hover:shadow-lg dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white`;
 
-export const btnSecondary = `${btn} border border-black/15 hover:bg-black/[.04] dark:border-white/20 dark:hover:bg-white/[.06]`;
+export const btnSecondary = `${btn} border border-black/10 bg-white shadow-sm hover:bg-zinc-50 dark:border-white/10 dark:bg-zinc-950 dark:hover:bg-zinc-900`;
 
 export const input =
-  'w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-white/20 dark:bg-zinc-900';
+  'w-full rounded-xl border border-black/10 bg-white px-4 py-2.5 text-sm shadow-sm outline-none transition-all focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 dark:border-white/10 dark:bg-zinc-900 dark:focus:border-zinc-400 dark:focus:ring-white/10';
 
-export const label = 'block text-sm font-medium mb-1.5';
+export const label = 'block text-sm font-medium mb-1.5 text-zinc-700 dark:text-zinc-300';
 
 export const card =
-  'rounded-lg border border-black/10 bg-white p-5 dark:border-white/15 dark:bg-zinc-950';
+  'rounded-2xl border border-black/5 bg-white p-6 shadow-sm transition-all hover:shadow-md dark:border-white/10 dark:bg-zinc-950 dark:hover:border-white/20';
 
 export const muted = 'text-sm text-zinc-600 dark:text-zinc-400';
 
@@ -86,11 +86,11 @@ export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () 
   return (
     <div
       role="alert"
-      className="rounded-md border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-300"
+      className="rounded-xl border border-red-500/30 bg-red-500/5 px-5 py-4 text-sm text-red-700 dark:text-red-300 shadow-sm"
     >
       <p>{message}</p>
       {onRetry ? (
-        <button type="button" onClick={onRetry} className="mt-2 underline">
+        <button type="button" onClick={onRetry} className="mt-2 font-medium underline underline-offset-2 hover:text-red-800 dark:hover:text-red-200">
           Try again
         </button>
       ) : null}
@@ -100,9 +100,9 @@ export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () 
 
 export function Empty({ children }: { children: ReactNode }) {
   return (
-    <p className={`rounded-md border border-dashed border-black/15 px-4 py-6 text-center ${muted} dark:border-white/20`}>
-      {children}
-    </p>
+    <div className={`flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-black/10 bg-zinc-50/50 px-6 py-12 text-center ${muted} dark:border-white/10 dark:bg-zinc-900/50`}>
+      <p>{children}</p>
+    </div>
   );
 }
 

@@ -40,13 +40,13 @@ export function Nav() {
   }
 
   return (
-    <header className="border-b border-black/10 dark:border-white/15">
-      <nav className="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-6 gap-y-3 px-6 py-4">
-        <Link href={user ? homeFor(user) : '/'} className="font-semibold tracking-tight">
+    <header className="sticky top-0 z-50 border-b border-black/5 bg-white/80 backdrop-blur-md dark:border-white/10 dark:bg-zinc-950/80">
+      <nav className="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-8 gap-y-3 px-6 py-4">
+        <Link href={user ? homeFor(user) : '/'} className="text-lg font-bold tracking-tight text-zinc-900 transition-colors hover:text-zinc-600 dark:text-white dark:hover:text-zinc-300">
           CPS&nbsp;LMS
         </Link>
 
-        <ul className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+        <ul className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm font-medium">
           {links.map((link) => {
             const active = pathname === link.href || pathname.startsWith(`${link.href}/`);
             return (
@@ -55,8 +55,8 @@ export function Nav() {
                   href={link.href}
                   className={
                     active
-                      ? 'font-medium underline decoration-2 underline-offset-4'
-                      : 'text-zinc-600 hover:text-black dark:text-zinc-400 dark:hover:text-white'
+                      ? 'text-zinc-900 underline decoration-2 underline-offset-[6px] dark:text-white'
+                      : 'text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white'
                   }
                 >
                   {link.label}
