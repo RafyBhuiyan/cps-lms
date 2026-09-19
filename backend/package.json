@@ -9,10 +9,15 @@
     "deploy": "strapi deploy",
     "dev": "strapi develop",
     "develop": "strapi develop",
+    "seed": "node scripts/seed.js",
+    "seed:courses": "node scripts/seed-courses.js",
+    "permissions": "node scripts/permissions.js",
+    "backfill:enrollments": "node scripts/backfill-enrollment-status.js",
     "start": "strapi start",
     "strapi": "strapi",
     "upgrade": "npx @strapi/upgrade latest",
-    "upgrade:dry": "npx @strapi/upgrade latest --dry"
+    "upgrade:dry": "npx @strapi/upgrade latest --dry",
+    "verify": "bash scripts/verify.sh"
   },
   "dependencies": {
     "@strapi/database": "5.52.2",

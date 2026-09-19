@@ -26,9 +26,15 @@ const deniedTypes = [
 const config = ({ env }: Core.Config.Shared.ConfigParams): Core.Config.Plugin => ({
   'users-permissions': {
     config: {
-      jwtManagement: 'refresh',
-      sessions: {
-        httpOnly: true,
+      // 'refresh' issues a 10-minute access token plus an httpOnly refresh
+      // cookie. That cookie defaults to sameSite: 'lax', which a cross-site
+      // Vercel -> Railway request will not send, so the silent refresh fails in
+      // production and users are logged out after 10 minutes. The frontend keeps
+      // its token in localStorage and sends it in the Authorization header, so a
+      // long-lived JWT is the mode that actually matches how it authenticates.
+      jwtManagement: 'legacy-support',
+      jwt: {
+        expiresIn: '30d',
       },
     },
   },
